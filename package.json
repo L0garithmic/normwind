@@ -1,0 +1,49 @@
+{
+  "name": "@lunawerx/normwind",
+  "version": "1.0.2",
+  "description": "Normalize Tailwinds: Tailwind shorthand audit, canonicalization checks, and safe autofix",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/L0garithmic/normwind.git"
+  },
+  "homepage": "https://github.com/L0garithmic/normwind",
+  "bugs": {
+    "url": "https://github.com/L0garithmic/normwind/issues"
+  },
+  "bin": {
+    "normwind": "bin/normwind.mjs",
+    "normwinds": "bin/normwind.mjs"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "tailwind",
+    "tailwindcss",
+    "eslint",
+    "lint",
+    "cli",
+    "shorthand",
+    "canonicalization",
+    "autofix",
+    "codemod",
+    "vue",
+    "react",
+    "typescript",
+    "utility-classes",
+    "class-normalization"
+  ],
+  "dependencies": {
+    "eslint-plugin-tailwindcss": "^3.18.3",
+    "tailwindcss": "^4.1.13"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
