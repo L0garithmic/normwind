@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-const NORMWINDS_VERSION = "3.0.1";
+const NORMWINDS_VERSION = "3.0.2";
 const RULE_ID = "tailwindcss/enforces-shorthand";
 const DEFAULT_PATTERNS = ["**/*.{vue,js,mjs,ts,jsx,tsx}"];
 const ROOT_FONT_SIZE_PX = 16;

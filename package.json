@@ -1,7 +1,7 @@
 {
   "name": "@lunawerx/normwind",
-  "version": "3.0.1",
-  "description": "Normalize Tailwinds: Tailwind shorthand audit, canonicalization checks, and safe autofix",
+  "version": "3.0.2",
+  "description": "NormWind / NormWinds: Tailwind shorthand audit, canonicalization checks, and safe autofix",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -24,6 +24,8 @@
     "node": ">=20"
   },
   "keywords": [
+    "normwind",
+    "normwinds",
     "tailwind",
     "tailwindcss",
     "eslint",

@@ -2,7 +2,7 @@
 
 Normalize Tailwinds.
 
-NormWind is a Tailwind CSS shorthand linter + autofixer focused on one job: replace verbose utility combinations with canonical, shorter, safer class names.
+NormWind, also searchable as `NormWinds`, is a Tailwind CSS shorthand linter + autofixer focused on one job: replace verbose utility combinations with canonical, shorter, safer class names.
 
 If you use Tailwind in Vue, React, or TypeScript projects and want cleaner utility strings that are easier to maintain, NormWind gives you an automated path.
 
@@ -36,6 +36,8 @@ NormWind audits and optionally fixes these patterns so your class lists are:
 ```bash
 npm i -D @lunawerx/normwind
 ```
+
+The package exposes both `normwind` and `normwinds` as CLI commands, so either spelling works in your terminal.
 
 ## Quick Start
 
