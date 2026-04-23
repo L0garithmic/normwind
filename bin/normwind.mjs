@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-const NORMWINDS_VERSION = "3.0.0";
+const NORMWINDS_VERSION = "3.0.1";
 const RULE_ID = "tailwindcss/enforces-shorthand";
 const DEFAULT_PATTERNS = ["**/*.{vue,js,mjs,ts,jsx,tsx}"];
 const ROOT_FONT_SIZE_PX = 16;
@@ -875,11 +875,11 @@ function mergeFixWidthHeight(tokens) {
     return changed;
 }
 
-function looksLikeFixableClassString(content) {
-    if (/[=><&|?]/.test(content)) {
-        return false;
-    }
+function hasSingleTokenTransformPotential(token) {
+    return token.includes("[") || (token.startsWith("!") && !token.endsWith("!")) || /:[!]/.test(token);
+}
 
+function hasTransformableClassLikeContent(content) {
     const tokens = content.trim().split(/\s+/).filter(Boolean);
     if (tokens.length === 0) {
         return false;
@@ -891,11 +891,18 @@ function looksLikeFixableClassString(content) {
     }
 
     if (classLikeTokens.length === 1) {
-        const token = classLikeTokens[0];
-        return (token.startsWith("!") && !token.endsWith("!")) || /:[!]/.test(token);
+        return hasSingleTokenTransformPotential(classLikeTokens[0]);
     }
 
     return false;
+}
+
+function looksLikeFixableClassString(content) {
+    if (/[=><&|?]/.test(content)) {
+        return false;
+    }
+
+    return hasTransformableClassLikeContent(content);
 }
 
 function transformFixableClassContent(content, canonicalizeCandidate) {
@@ -1324,11 +1331,6 @@ function extractClassLikeStrings(sourceText) {
     for (const quoteRegex of quoteRegexes) {
         while ((match = quoteRegex.exec(sourceText)) !== null) {
             const value = match[1];
-            const singleToken = !value.includes(" ");
-            if (singleToken && !(value.startsWith("!") || value.includes(":!"))) {
-                continue;
-            }
-
             if (!value.includes("-") && !value.includes("!")) {
                 continue;
             }
@@ -1342,6 +1344,10 @@ function extractClassLikeStrings(sourceText) {
             }
 
             if (!QUOTE_VALUE_SHAPE.test(value)) {
+                continue;
+            }
+
+            if (!hasTransformableClassLikeContent(value)) {
                 continue;
             }
 

@@ -27,6 +27,7 @@ NormWind audits and optionally fixes these patterns so your class lists are:
 - Canonicalization checks against Tailwind's design system for arbitrary values
 - Safe autofix mode for Vue-first class string rewrites
 - Optional broader autofix mode for all supported file types
+- Vue/component prop class strings and dynamic `:class` branches with single-token arbitrary utilities are audited and auto-fixed
 - JSON output mode for CI pipelines and custom reporting
 - Canonical extraction mode to generate replacement references
 
@@ -49,6 +50,8 @@ Apply safe fixes and re-audit:
 ```bash
 npx @lunawerx/normwind --fix
 ```
+
+This also catches single-token arbitrary utilities in Vue-oriented strings such as `panel-class="z-[var(--token)]"` and `:class="open ? 'aspect-[21/7]' : ''"`.
 
 Run the broader fixer:
 
