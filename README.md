@@ -28,6 +28,7 @@ NormWind audits and optionally fixes these patterns so your class lists are:
 - Safe autofix mode for Vue-first class string rewrites
 - Optional broader autofix mode for all supported file types
 - Vue/component prop class strings and dynamic `:class` branches with single-token arbitrary utilities are audited and auto-fixed
+- Canonical replacements now include cases like `break-words` → `wrap-break-word` and `aspect-[21/7]` → `aspect-21/7`
 - JSON output mode for CI pipelines and custom reporting
 - Canonical extraction mode to generate replacement references
 
@@ -54,6 +55,8 @@ npx @lunawerx/normwind --fix
 ```
 
 This also catches single-token arbitrary utilities in Vue-oriented strings such as `panel-class="z-[var(--token)]"` and `:class="open ? 'aspect-[21/7]' : ''"`.
+
+Recent canonical fixes also cover `break-words`, variant forms like `hover:break-words`, and ratio utilities such as `aspect-[21/7]`.
 
 Run the broader fixer:
 
