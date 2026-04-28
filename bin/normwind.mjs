@@ -183,6 +183,28 @@ function lookupCanonicalFromMemo(candidate) {
     return CANONICAL_MEMO.get(candidate);
 }
 
+const KNOWN_CANONICAL_UTILITY_REPLACEMENTS = new Map([
+    [["break", "words"].join("-"), ["wrap", "break", "word"].join("-")],
+]);
+
+function getKnownCanonicalClass(raw) {
+    if (!raw || typeof raw !== "string") {
+        return null;
+    }
+
+    const token = parseFixToken(raw);
+    const utility = KNOWN_CANONICAL_UTILITY_REPLACEMENTS.get(token.utility);
+    if (!utility) {
+        return null;
+    }
+
+    return buildFixToken({
+        variants: token.variants,
+        utility,
+        important: token.important,
+    });
+}
+
 const COMPLEX_EQUIVALENCES = {
     placeContentOptions: [
         "center",
@@ -875,11 +897,15 @@ function mergeFixWidthHeight(tokens) {
     return changed;
 }
 
-function hasSingleTokenTransformPotential(token) {
-    return token.includes("[") || (token.startsWith("!") && !token.endsWith("!")) || /:[!]/.test(token);
+function hasSingleTokenTransformPotential(token, { allowSingleTokenCanonical = false } = {}) {
+    return Boolean(
+        (allowSingleTokenCanonical && (token.includes("[") || getKnownCanonicalClass(token))) ||
+        (token.startsWith("!") && !token.endsWith("!")) ||
+        /:[!]/.test(token),
+    );
 }
 
-function hasTransformableClassLikeContent(content) {
+function hasTransformableClassLikeContent(content, { allowSingleTokenCanonical = false } = {}) {
     const tokens = content.trim().split(/\s+/).filter(Boolean);
     if (tokens.length === 0) {
         return false;
@@ -891,18 +917,18 @@ function hasTransformableClassLikeContent(content) {
     }
 
     if (classLikeTokens.length === 1) {
-        return hasSingleTokenTransformPotential(classLikeTokens[0]);
+        return hasSingleTokenTransformPotential(classLikeTokens[0], { allowSingleTokenCanonical });
     }
 
     return false;
 }
 
-function looksLikeFixableClassString(content) {
+function looksLikeFixableClassString(content, { allowSingleTokenCanonical = false } = {}) {
     if (/[=><&|?]/.test(content)) {
         return false;
     }
 
-    return hasTransformableClassLikeContent(content);
+    return hasTransformableClassLikeContent(content, { allowSingleTokenCanonical });
 }
 
 function transformFixableClassContent(content, canonicalizeCandidate) {
@@ -927,6 +953,12 @@ function transformFixableClassContent(content, canonicalizeCandidate) {
                 tokens[i] = normalized;
                 changed = true;
             }
+        }
+
+        const knownCanonical = getKnownCanonicalClass(tokens[i]);
+        if (knownCanonical && knownCanonical !== tokens[i]) {
+            tokens[i] = knownCanonical;
+            changed = true;
         }
 
         if (!isLikelyFixUtility(tokens[i]) || !canonicalizeCandidate) {
@@ -968,12 +1000,12 @@ function transformFixableClassContent(content, canonicalizeCandidate) {
     return `${leading}${tokens.join(" ")}${trailing}`;
 }
 
-function applyFixesToText(text, canonicalizeCandidate) {
+function applyFixesToText(text, canonicalizeCandidate, { allowSingleTokenCanonical = false } = {}) {
     let changed = false;
 
     const transformQuotedStrings = (input, regex, quote) =>
         input.replace(regex, (full, content) => {
-            if (!looksLikeFixableClassString(content)) {
+            if (!looksLikeFixableClassString(content, { allowSingleTokenCanonical })) {
                 return full;
             }
 
@@ -1012,7 +1044,9 @@ async function applyFixes(filePaths, { fixAll = false } = {}) {
         const canonicalizeCandidate = sourceText.includes("[")
             ? await getCanonicalizeCandidate().catch(() => null)
             : null;
-        const { changed, transformed } = applyFixesToText(sourceText, canonicalizeCandidate);
+        const { changed, transformed } = applyFixesToText(sourceText, canonicalizeCandidate, {
+            allowSingleTokenCanonical: filePath.endsWith(".vue"),
+        });
         if (!changed) {
             continue;
         }
@@ -1314,7 +1348,7 @@ function indexToLineCol(lineStarts, index) {
 
 const QUOTE_VALUE_SHAPE = /\b(?:[a-z]+:)*!?-?[a-z][a-z0-9-]*(?:-[^\s]+)*!?\b/i;
 
-function extractClassLikeStrings(sourceText) {
+function extractClassLikeStrings(sourceText, { allowSingleTokenCanonical = false } = {}) {
     const results = [];
     const classAttrRegex = /\bclass\s*=\s*(["'])([^"']+)\1/g;
     let match;
@@ -1347,7 +1381,7 @@ function extractClassLikeStrings(sourceText) {
                 continue;
             }
 
-            if (!hasTransformableClassLikeContent(value)) {
+            if (!hasTransformableClassLikeContent(value, { allowSingleTokenCanonical })) {
                 continue;
             }
 
@@ -1597,7 +1631,9 @@ async function collectStaticShorthandFindings(filePaths) {
             return;
         }
 
-        const snippets = extractClassLikeStrings(sourceText);
+        const snippets = extractClassLikeStrings(sourceText, {
+            allowSingleTokenCanonical: filePath.endsWith(".vue"),
+        });
         if (snippets.length === 0) {
             fileContexts[idx] = null;
             return;
@@ -1721,11 +1757,11 @@ async function collectStaticShorthandFindings(filePaths) {
 
                 parsedTokens.push(token);
 
-                // v3 optimization: only emit canonicalize findings for tokens
-                // that actually contain arbitrary values. Non-arbitrary tokens
-                // are always identity under Tailwind's canonicalizer.
-                if (token.importantPrefix && !token.importantSuffix) {
-                    const canonical = formatClass(token.variants, true, token.utility);
+                // v3 optimization: avoid the Tailwind canonicalizer for general
+                // non-arbitrary tokens, but still report explicit known aliases.
+                const knownCanonical = getKnownCanonicalClass(token.raw);
+                if (knownCanonical || (token.importantPrefix && !token.importantSuffix)) {
+                    const canonical = knownCanonical ?? formatClass(token.variants, true, token.utility);
                     const ls = ensureLineStarts();
                     const { line, column } = indexToLineCol(ls, snippet.index + tokenMatch.index);
                     maybePushFinding(localFound, {
