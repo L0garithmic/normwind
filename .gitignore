@@ -1,0 +1,12 @@
+# npm pack artefacts — never commit tarballs
+*.tgz
+
+# local env / secrets
+.env
+.env.*
+*.npmrc
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
