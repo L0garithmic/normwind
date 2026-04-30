@@ -1,7 +1,7 @@
 {
   "name": "@lunawerx/normwind",
-  "version": "3.0.3",
-  "description": "NormWind / NormWinds: Tailwind shorthand audit, canonicalization checks, and safe autofix",
+  "version": "3.1.0",
+  "description": "Normalize Tailwinds: Tailwind shorthand audit, canonicalization checks, and safe autofix",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -18,14 +18,23 @@
   },
   "files": [
     "bin",
+    "docs/reference/canonical-replacements.json",
+    "docs/reference/canonical-replacements.md",
     "README.md"
   ],
+  "scripts": {
+    "canonical:extract": "node bin/normwind.mjs --extract-canonical --write-canonical-files",
+    "canonical:check": "node bin/normwind.mjs --check-canonical",
+    "test": "node scripts/test-prepush.mjs",
+    "prepush": "node scripts/test-prepush.mjs",
+    "test:regression": "node scripts/test-regression.mjs",
+    "test:regression:update": "node scripts/test-regression.mjs --update",
+    "test:compare": "node scripts/test-compare.mjs"
+  },
   "engines": {
     "node": ">=20"
   },
   "keywords": [
-    "normwind",
-    "normwinds",
     "tailwind",
     "tailwindcss",
     "eslint",

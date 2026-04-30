@@ -1,0 +1,37 @@
+{
+  "ruleId": "tailwindcss/enforces-shorthand",
+  "lintedFiles": 1,
+  "findingCount": 5,
+  "findings": [
+    {
+      "filePath": "input.tsx",
+      "line": 6,
+      "column": 21,
+      "message": "Classnames 'rounded-tl-lg, rounded-tr-lg' could be replaced by the 'rounded-t-lg' shorthand!"
+    },
+    {
+      "filePath": "input.tsx",
+      "line": 10,
+      "column": 21,
+      "message": "Classnames 'rounded-bl-md, rounded-br-md' could be replaced by the 'rounded-b-md' shorthand!"
+    },
+    {
+      "filePath": "input.tsx",
+      "line": 10,
+      "column": 21,
+      "message": "Classnames 'rounded-tl-md, rounded-bl-md' could be replaced by the 'rounded-l-md' shorthand!"
+    },
+    {
+      "filePath": "input.tsx",
+      "line": 10,
+      "column": 21,
+      "message": "Classnames 'rounded-tl-md, rounded-tr-md' could be replaced by the 'rounded-t-md' shorthand!"
+    },
+    {
+      "filePath": "input.tsx",
+      "line": 10,
+      "column": 21,
+      "message": "Classnames 'rounded-tr-md, rounded-br-md' could be replaced by the 'rounded-r-md' shorthand!"
+    }
+  ]
+}

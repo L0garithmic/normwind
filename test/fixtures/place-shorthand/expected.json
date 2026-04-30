@@ -1,0 +1,25 @@
+{
+  "ruleId": "tailwindcss/enforces-shorthand",
+  "lintedFiles": 1,
+  "findingCount": 3,
+  "findings": [
+    {
+      "filePath": "input.tsx",
+      "line": 7,
+      "column": 21,
+      "message": "Classnames 'content-center, justify-center' could be replaced by the 'place-content-center' shorthand!"
+    },
+    {
+      "filePath": "input.tsx",
+      "line": 11,
+      "column": 21,
+      "message": "Classnames 'items-start, justify-items-start' could be replaced by the 'place-items-start' shorthand!"
+    },
+    {
+      "filePath": "input.tsx",
+      "line": 15,
+      "column": 21,
+      "message": "Classnames 'self-end, justify-self-end' could be replaced by the 'place-self-end' shorthand!"
+    }
+  ]
+}

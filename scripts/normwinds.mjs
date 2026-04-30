@@ -5,11 +5,9 @@ import fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const PACKAGE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
 const NORMWINDS_VERSION = "3.1.0";
 const RULE_ID = "tailwindcss/enforces-shorthand";
@@ -23,10 +21,6 @@ const CANONICAL_OUTPUT_JSON = path.resolve(
 const CANONICAL_OUTPUT_MD = path.resolve(
     process.cwd(),
     "docs/reference/canonical-replacements.md",
-);
-const BUNDLED_CANONICAL_JSON = path.resolve(
-    PACKAGE_ROOT,
-    "docs/reference/canonical-replacements.json",
 );
 const RG_IGNORE_GLOBS = [
     "!.git",
@@ -135,46 +129,6 @@ async function saveDiskCache() {
     } catch {
         // Cache persistence is best-effort — never fail the run.
     }
-}
-
-async function loadCanonicalSnapshot() {
-    if (process.env.NORMWIND_DISABLE_CANONICAL_SNAPSHOT === "1") {
-        return false;
-    }
-
-    const paths = [...new Set([CANONICAL_OUTPUT_JSON, BUNDLED_CANONICAL_JSON])];
-    const { tailwindPkg } = loadTailwind();
-
-    for (const snapshotPath of paths) {
-        try {
-            const raw = await fs.readFile(snapshotPath, "utf8");
-            const parsed = JSON.parse(raw);
-
-            if (
-                !parsed ||
-                parsed.source?.tailwindVersion !== tailwindPkg.version ||
-                !Array.isArray(parsed.replacements)
-            ) {
-                continue;
-            }
-
-            for (const replacement of parsed.replacements) {
-                if (
-                    replacement &&
-                    typeof replacement.inputClass === "string" &&
-                    typeof replacement.canonicalClass === "string"
-                ) {
-                    CANONICAL_MEMO.set(replacement.inputClass, replacement.canonicalClass);
-                }
-            }
-
-            return true;
-        } catch {
-            // Try the next snapshot source.
-        }
-    }
-
-    return false;
 }
 
 // Invalidate the in-memory cache if the Tailwind version on disk doesn't match
@@ -343,7 +297,6 @@ function parseArgs(argv) {
     }
 
     return {
-        checkCanonical: flags.has("--check-canonical"),
         cleanupCanonicalFiles: flags.has("--cleanup-canonical-files"),
         extractCanonical: flags.has("--extract-canonical"),
         fix: flags.has("--fix") || flags.has("--fixall"),
@@ -521,7 +474,7 @@ function addCanonicalReplacement(replacements, inputClass, canonicalClass, sourc
     }
 }
 
-async function extractCanonicalReplacements({ writeFiles, checkOnly = false }) {
+async function extractCanonicalReplacements({ writeFiles }) {
     const { designSystem, tailwindIndexCssPath } = await loadTailwindDesignSystem();
     const { tailwindPkg } = loadTailwind();
 
@@ -589,6 +542,7 @@ async function extractCanonicalReplacements({ writeFiles, checkOnly = false }) {
 
     const payload = {
         toolVersion: NORMWINDS_VERSION,
+        generatedAt: new Date().toISOString(),
         source: {
             engine: "tailwindcss.designSystem.canonicalizeCandidates",
             tailwindVersion: tailwindPkg.version,
@@ -616,6 +570,7 @@ async function extractCanonicalReplacements({ writeFiles, checkOnly = false }) {
         `- Normwinds version: \`${NORMWINDS_VERSION}\``,
         "- Source engine: `tailwindcss.designSystem.canonicalizeCandidates`",
         `- Tailwind version: \`${tailwindPkg.version}\``,
+        `- Generated at: \`${payload.generatedAt}\``,
         `- Class list scanned: \`${classList.length}\``,
         `- Canonical replacements extracted: \`${replacements.length}\``,
         "",
@@ -658,32 +613,11 @@ async function extractCanonicalReplacements({ writeFiles, checkOnly = false }) {
         "- `docs/reference/canonical-replacements.json`",
     );
 
-    const jsonText = `${JSON.stringify(payload, null, 2)}\n`;
-    const markdownText = `${markdownLines.join("\n")}\n`;
-
-    if (checkOnly) {
-        const [existingJson, existingMarkdown] = await Promise.all([
-            fs.readFile(CANONICAL_OUTPUT_JSON, "utf8").catch(() => null),
-            fs.readFile(CANONICAL_OUTPUT_MD, "utf8").catch(() => null),
-        ]);
-
-        if (existingJson !== jsonText || existingMarkdown !== markdownText) {
-            console.error("normwinds: canonical replacement artifacts are out of date.");
-            console.error("Run `normwind --extract-canonical --write-canonical-files` and commit the generated files.");
-            process.exitCode = 1;
-            return;
-        }
-
-        console.log(`normwinds v${NORMWINDS_VERSION}: canonical replacement artifacts are up to date.`);
-        return;
-    }
-
     console.log(`normwinds v${NORMWINDS_VERSION}: extracted ${replacements.length} canonical replacement(s).`);
 
     if (writeFiles) {
-        await fs.mkdir(path.dirname(CANONICAL_OUTPUT_JSON), { recursive: true });
-        await fs.writeFile(CANONICAL_OUTPUT_JSON, jsonText, "utf8");
-        await fs.writeFile(CANONICAL_OUTPUT_MD, markdownText, "utf8");
+        await fs.writeFile(CANONICAL_OUTPUT_JSON, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+        await fs.writeFile(CANONICAL_OUTPUT_MD, `${markdownLines.join("\n")}\n`, "utf8");
         console.log(`  wrote ${path.relative(process.cwd(), CANONICAL_OUTPUT_JSON)}`);
         console.log(`  wrote ${path.relative(process.cwd(), CANONICAL_OUTPUT_MD)}`);
         return;
@@ -1895,7 +1829,6 @@ function printTextReport(findings, lintedFiles) {
 
 async function main() {
     const {
-        checkCanonical,
         cleanupCanonicalFiles,
         extractCanonical,
         fix,
@@ -1911,11 +1844,6 @@ async function main() {
         return;
     }
 
-    if (checkCanonical) {
-        await extractCanonicalReplacements({ writeFiles: false, checkOnly: true });
-        return;
-    }
-
     if (extractCanonical) {
         await extractCanonicalReplacements({ writeFiles: writeCanonicalFiles });
         return;
@@ -1923,10 +1851,7 @@ async function main() {
 
     const [filePaths] = await Promise.all([
         listTargetFiles(patterns),
-        (async () => {
-            await loadDiskCache();
-            await loadCanonicalSnapshot();
-        })(),
+        loadDiskCache(),
     ]);
 
     if (fix) {

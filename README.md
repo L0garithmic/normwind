@@ -2,35 +2,29 @@
 
 Normalize Tailwinds.
 
-NormWind, also searchable as `NormWinds`, is a Tailwind CSS shorthand linter + autofixer focused on one job: replace verbose utility combinations with canonical, shorter, safer class names.
+NormWind is a small Tailwind CSS utility-class auditor and autofixer. It finds verbose utility combinations and non-canonical arbitrary values, then reports or rewrites them as shorter, canonical Tailwind classes.
 
-If you use Tailwind in Vue, React, or TypeScript projects and want cleaner utility strings that are easier to maintain, NormWind gives you an automated path.
+Examples:
 
-## Why NormWind
+- `px-4 py-4` -> `p-4`
+- `pl-2 pr-2` -> `px-2`
+- `w-6 h-6` -> `size-6`
+- `content-center justify-center` -> `place-content-center`
+- `rounded-[24px]` -> `rounded-3xl`
+- `w-[100%]` -> `w-full`
 
-Tailwind codebases drift over time. Teams add classes quickly, and eventually you get repetitive patterns such as:
+## Why use it?
 
-- `px-4 py-4` instead of `p-4`
-- `w-6 h-6` instead of `size-6`
-- non-canonical arbitrary values where a standard utility already exists
+Tailwind codebases drift. Over time, teams and AI tools generate class strings that are valid but noisier than they need to be. NormWind keeps those class strings compact and consistent without forcing a formatter or sorting policy onto the project.
 
-NormWind audits and optionally fixes these patterns so your class lists are:
+NormWind is useful when you want:
 
-- shorter
-- more consistent
-- easier to review
-- easier for AI coding tools to understand and transform correctly
-
-## Features
-
-- Tailwind shorthand detection for common utility families (spacing, sizing, inset, gap, overflow, and more)
-- Canonicalization checks against Tailwind's design system for arbitrary values
-- Safe autofix mode for Vue-first class string rewrites
-- Optional broader autofix mode for all supported file types
-- Vue/component prop class strings and dynamic `:class` branches with single-token arbitrary utilities are audited and auto-fixed
-- Canonical replacements now include cases like `break-words` → `wrap-break-word` and `aspect-[21/7]` → `aspect-21/7`
-- JSON output mode for CI pipelines and custom reporting
-- Canonical extraction mode to generate replacement references
+- shorter class strings
+- consistent shorthand usage
+- fewer arbitrary values when a named Tailwind token exists
+- CI enforcement for utility cleanup
+- safe autofixes for Vue projects
+- broader codemod-style fixes when explicitly requested
 
 ## Install
 
@@ -38,47 +32,122 @@ NormWind audits and optionally fixes these patterns so your class lists are:
 npm i -D @lunawerx/normwind
 ```
 
-The package exposes both `normwind` and `normwinds` as CLI commands, so either spelling works in your terminal.
-
-## Quick Start
-
-Run an audit:
+Run without installing globally:
 
 ```bash
 npx @lunawerx/normwind
 ```
 
-Apply safe fixes and re-audit:
+The package exposes both command names:
+
+```bash
+normwind
+normwinds
+```
+
+## Quick start
+
+Audit the current project:
+
+```bash
+npx @lunawerx/normwind
+```
+
+Apply safe Vue-first fixes, then re-audit:
 
 ```bash
 npx @lunawerx/normwind --fix
 ```
 
-This also catches single-token arbitrary utilities in Vue-oriented strings such as `panel-class="z-[var(--token)]"` and `:class="open ? 'aspect-[21/7]' : ''"`.
-
-Recent canonical fixes also cover `break-words`, variant forms like `hover:break-words`, and ratio utilities such as `aspect-[21/7]`.
-
-Run the broader fixer:
+Apply fixes across all supported file types:
 
 ```bash
 npx @lunawerx/normwind --fixall
 ```
 
-## CLI Commands
+Emit JSON for CI or custom tooling:
 
-- `normwind` runs the shorthand/canonical audit and exits with code `1` when findings exist
-- `normwind --fix` applies safe autofixes (Vue-first scope) then re-runs audit
-- `normwind --fixall` applies broader autofixes across supported file types
-- `normwind --json` prints machine-readable output
-- `normwind --extract-canonical` performs canonical extraction in ephemeral mode
-- `normwind --extract-canonical --write-canonical-files` writes canonical artifacts to docs/reference
-- `normwind --cleanup-canonical-files` removes generated canonical artifacts
+```bash
+npx @lunawerx/normwind --json
+```
 
-## File Matching
+## What NormWind checks
+
+### Shorthand utility combinations
+
+NormWind detects class groups that Tailwind can express with a shorter shorthand:
+
+| Verbose | Canonical shorthand |
+| --- | --- |
+| `px-4 py-4` | `p-4` |
+| `pl-2 pr-2` | `px-2` |
+| `mt-3 mb-3` | `my-3` |
+| `left-0 right-0` | `inset-x-0` |
+| `top-0 bottom-0` | `inset-y-0` |
+| `gap-x-4 gap-y-4` | `gap-4` |
+| `overflow-x-hidden overflow-y-hidden` | `overflow-hidden` |
+| `w-6 h-6` | `size-6` |
+| `content-center justify-center` | `place-content-center` |
+| `items-start justify-items-start` | `place-items-start` |
+| `self-end justify-self-end` | `place-self-end` |
+
+The shorthand family data comes from `eslint-plugin-tailwindcss`'s Tailwind utility group definitions. NormWind uses that authoritative group data directly while keeping a Tailwind v4-compatible matcher.
+
+### Canonical arbitrary values
+
+NormWind also detects arbitrary values that Tailwind's own design-system canonicalizer can express as named utilities:
+
+| Arbitrary | Canonical |
+| --- | --- |
+| `rounded-[24px]` | `rounded-3xl` |
+| `w-[100%]` | `w-full` |
+| `h-[1.5rem]` | `h-6` |
+| `p-[1rem]` | `p-4` |
+| `m-[8px]` | `m-2` |
+
+Canonical mappings come from Tailwind's own `designSystem.canonicalizeCandidates` engine.
+
+## Canonical replacement snapshot
+
+NormWind ships a generated Tailwind canonical replacement snapshot:
+
+- `docs/reference/canonical-replacements.json`
+- `docs/reference/canonical-replacements.md`
+
+This snapshot is generated from Tailwind's own canonicalization engine for the Tailwind version bundled by this package. It gives users fast, deterministic first-run canonical checks without writing generated files into their projects.
+
+Lookup order:
+
+1. A project-local snapshot at `docs/reference/canonical-replacements.json`, if present.
+2. The package-bundled snapshot.
+3. Tailwind's live design-system canonicalizer for cache misses or missing snapshots.
+
+Maintainers can regenerate and verify the snapshot with:
+
+```bash
+npm run canonical:extract
+npm run canonical:check
+```
+
+`canonical:check` is deterministic and suitable for CI.
+
+## File matching
 
 By default, NormWind scans:
 
-- `**/*.{vue,js,mjs,ts,jsx,tsx}`
+```text
+**/*.{vue,js,mjs,ts,jsx,tsx}
+```
+
+It ignores common generated or dependency folders such as:
+
+- `.git`
+- `node_modules`
+- `dist`
+- `test-results`
+- `cdk.out`
+- `.tmp`
+- `.saydeploy`
 
 Target specific paths or globs:
 
@@ -88,36 +157,153 @@ npx @lunawerx/normwind "src/**/*.vue"
 npx @lunawerx/normwind "apps/web/**/*.{tsx,ts}"
 ```
 
-## Example Output
+## CLI reference
+
+| Command | Behavior |
+| --- | --- |
+| `normwind` | Audit supported files. Exits `1` when findings exist. |
+| `normwind --json` | Print machine-readable audit output. |
+| `normwind --fix` | Apply safe Vue-first fixes, then re-run the audit. |
+| `normwind --fixall` | Apply broader fixes across Vue, JS, MJS, TS, JSX, and TSX, then re-run the audit. |
+| `normwind --extract-canonical` | Extract canonical replacements in memory and print a summary. |
+| `normwind --extract-canonical --write-canonical-files` | Write `docs/reference/canonical-replacements.{json,md}`. |
+| `normwind --check-canonical` | Fail if generated canonical files are missing or stale. |
+| `normwind --cleanup-canonical-files` | Remove generated canonical files from `docs/reference`. |
+
+## Output
+
+Text output groups findings by file:
 
 ```text
+normwinds v3.1.0: 2 finding(s) across 1 linted file(s).
+
 src/components/Card.vue
-	42:14 Classnames 'px-4, py-4' could be replaced by the 'p-4' shorthand!
-	67:10 The class 'rounded-[24px]' can be written as 'rounded-3xl'
+    42:14 Classnames 'px-4, py-4' could be replaced by the 'p-4' shorthand!
+    67:10 The class 'rounded-[24px]' can be written as 'rounded-3xl'
 ```
 
-## CI Usage
+JSON output is stable for CI and tooling:
 
-NormWind is designed for pull request enforcement:
+```json
+{
+  "version": "3.1.0",
+  "ruleId": "tailwindcss/enforces-shorthand",
+  "lintedFiles": 1,
+  "findingCount": 1,
+  "findings": [
+    {
+      "filePath": "src/components/Card.vue",
+      "line": 42,
+      "column": 14,
+      "message": "Classnames 'px-4, py-4' could be replaced by the 'p-4' shorthand!"
+    }
+  ]
+}
+```
+
+## Exit codes
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | No findings, or requested maintenance command completed successfully. |
+| `1` | Audit findings exist, or canonical drift was detected. |
+| `2` | Runtime failure. |
+
+## Fix modes
+
+### `--fix`
+
+`--fix` is intentionally conservative. It targets Vue-first class-string rewrites and is the best default for application projects that want safe cleanup.
+
+### `--fixall`
+
+`--fixall` applies the broader class-string rewrite pass across all supported source file types. Use this for explicit cleanup branches, codemods, or repositories with review coverage.
+
+Always review autofix diffs before committing.
+
+## CI examples
+
+Fail a pull request when shorthand or canonical findings exist:
 
 ```bash
 npx @lunawerx/normwind --json
 ```
 
-Non-zero exit code means findings exist, making it easy to gate merges and keep Tailwind utility style consistent across teams.
+Run the package's full maintainer verification suite:
 
-## Best Fit
+```bash
+npm test
+```
 
-NormWind is ideal for:
+Maintainer pre-push check:
 
-- Tailwind CSS apps with many contributors
-- teams standardizing utility conventions
-- repositories using AI-assisted code generation where class consistency matters
-- design system cleanup and drift prevention initiatives
+```bash
+npm run prepush
+```
 
-## Package Keywords
+The pre-push suite verifies:
 
-Tailwind CSS, shorthand, canonicalization, linter, autofix, utility classes, codemod, Vue, React, TypeScript.
+- package metadata
+- canonical snapshot integrity
+- canonical drift
+- regression fixtures
+- live Tailwind canonicalizer vs snapshot parity
+- CLI audit/fix smoke behavior
+- `npm pack --dry-run` package contents
+
+## Package contents
+
+The npm package intentionally publishes only runtime assets and reference docs:
+
+- `bin/normwind.mjs`
+- `docs/reference/canonical-replacements.json`
+- `docs/reference/canonical-replacements.md`
+- `README.md`
+- `package.json`
+
+Tests and fixtures are kept in the source repository but excluded from the packed npm artifact.
+
+## Development
+
+Run all checks:
+
+```bash
+npm test
+```
+
+Update regression fixtures after an intentional behavior change:
+
+```bash
+npm run test:regression:update
+```
+
+Run the regression suite:
+
+```bash
+npm run test:regression
+```
+
+Compare live Tailwind canonicalization against the bundled snapshot:
+
+```bash
+npm run test:compare
+```
+
+Regenerate canonical replacement files:
+
+```bash
+npm run canonical:extract
+```
+
+Verify canonical replacement files are current:
+
+```bash
+npm run canonical:check
+```
+
+## Notes on Tailwind v4 and eslint-plugin-tailwindcss
+
+NormWind intentionally uses `eslint-plugin-tailwindcss`'s static group data instead of invoking the plugin's `enforces-shorthand` rule directly. Under Tailwind v4, the plugin's config path can return only `separator` and `prefix`, which prevents the rule from resolving many utility families. NormWind keeps the useful upstream group data while using its own Tailwind v4-compatible matcher and Tailwind's own v4 canonicalization engine.
 
 ## License
 
