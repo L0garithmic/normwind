@@ -305,6 +305,22 @@ npm run canonical:check
 
 NormWind intentionally uses `eslint-plugin-tailwindcss`'s static group data instead of invoking the plugin's `enforces-shorthand` rule directly. Under Tailwind v4, the plugin's config path can return only `separator` and `prefix`, which prevents the rule from resolving many utility families. NormWind keeps the useful upstream group data while using its own Tailwind v4-compatible matcher and Tailwind's own v4 canonicalization engine.
 
+## Changelog
+
+### v3.1.0 — 2026-04-29
+
+- **Bundled canonical snapshot** — ships `docs/reference/canonical-replacements.json` (12 086 entries) generated from Tailwind's own `designSystem.canonicalizeCandidates` engine; no cold boot required on first run
+- **`--check-canonical` flag** — exits `1` when the bundled snapshot is missing or stale; suitable for CI
+- **`canonical:extract` / `canonical:check` scripts** — maintainer workflow for regenerating and verifying the snapshot
+- **7-fixture regression harness** — covers arbitrary-canonical, corner shorthands, family shorthands, negative cases, place-shorthands, size-shorthands, and variant-prefixed shorthands
+- **Live-vs-snapshot parity test** — `test:compare` verifies the bundled snapshot matches Tailwind's live canonicalizer
+- **7-check pre-push suite** — `npm run prepush` gates metadata, snapshot integrity, drift, fixtures, parity, CLI smoke, and pack dry-run before any publish
+- **Tailwind v4 note** — documents why the `eslint-plugin-tailwindcss` rule is bypassed under v4 (plugin returns only `separator`/`prefix`); NormWind uses the upstream group data with its own v4-compatible matcher
+
+### v3.0.0
+
+Initial public release. Shorthand auditor and autofixer for Tailwind CSS utility classes.
+
 ## License
 
 MIT
