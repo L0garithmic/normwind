@@ -11,5 +11,13 @@
 Thumbs.db
 .vscode/
 
+# dependencies
 node_modules/
 
+# scratch / tooling sandboxes
+.tmp/
+.venv/
+.saydeploy/
+
+# regression-harness scratch output (only emitted when a fixture diverges)
+test/fixtures/**/actual.*
