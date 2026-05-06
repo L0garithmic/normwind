@@ -2,7 +2,7 @@
 
 This file is generated from Tailwind's canonicalization engine.
 
-- Normwinds version: `3.1.0`
+- Normwinds version: `3.1.1`
 - Source engine: `tailwindcss.designSystem.canonicalizeCandidates`
 - Tailwind version: `4.2.4`
 - Class list scanned: `22685`

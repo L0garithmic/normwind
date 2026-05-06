@@ -1,15 +1,18 @@
 #!/usr/bin/env node
 
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
+const PACKAGE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
-const NORMWINDS_VERSION = "3.1.0";
+const NORMWINDS_VERSION = "3.1.1";
 const RULE_ID = "tailwindcss/enforces-shorthand";
 const DEFAULT_PATTERNS = ["**/*.{vue,js,mjs,ts,jsx,tsx}"];
 const ROOT_FONT_SIZE_PX = 16;
@@ -21,6 +24,10 @@ const CANONICAL_OUTPUT_JSON = path.resolve(
 const CANONICAL_OUTPUT_MD = path.resolve(
     process.cwd(),
     "docs/reference/canonical-replacements.md",
+);
+const BUNDLED_CANONICAL_JSON = path.resolve(
+    PACKAGE_ROOT,
+    "docs/reference/canonical-replacements.json",
 );
 const RG_IGNORE_GLOBS = [
     "!.git",
@@ -80,6 +87,111 @@ async function loadTailwindDesignSystem() {
     return designSystemPromise;
 }
 
+// Match `@import "...";` (with or without trailing layer/media clauses).
+// Captures the import specifier in group 2. Quotes can be " or '.
+const CSS_IMPORT_REGEX = /@import\s+(["'])([^"']+)\1[^;]*;\s*/g;
+
+// True when an @import target is a local file path (`./x`, `../x`, `/x`).
+// Anything else (`tailwindcss`, `tailwindcss/preflight`, `@scope/pkg`, URLs)
+// is treated as a package/runtime import and dropped — Tailwind's own CSS is
+// already prepended by the caller, and other package imports cannot be
+// resolved without a real bundler.
+function isLocalCssImportSpecifier(spec) {
+    return spec.startsWith("./") || spec.startsWith("../") || spec.startsWith("/");
+}
+
+// Recursively inline local @import directives into the source CSS so
+// Tailwind's design-system loader sees the project's @theme blocks even when
+// they live in files imported from the entry CSS.
+async function inlineLocalCssImports(sourceCss, sourcePath, visited) {
+    const sourceDir = path.dirname(sourcePath);
+    const parts = [];
+    let lastIndex = 0;
+
+    CSS_IMPORT_REGEX.lastIndex = 0;
+    let match;
+    while ((match = CSS_IMPORT_REGEX.exec(sourceCss)) !== null) {
+        parts.push(sourceCss.slice(lastIndex, match.index));
+        lastIndex = CSS_IMPORT_REGEX.lastIndex;
+
+        const spec = match[2];
+        if (!isLocalCssImportSpecifier(spec)) {
+            // Drop package/url imports.
+            continue;
+        }
+
+        const importedAbs = path.resolve(sourceDir, spec);
+        if (visited.has(importedAbs)) {
+            // Already inlined upstream — silently skip to avoid cycles and
+            // duplicate @theme blocks.
+            continue;
+        }
+        visited.add(importedAbs);
+
+        let importedSource;
+        try {
+            importedSource = await fs.readFile(importedAbs, "utf8");
+        } catch (error) {
+            throw new Error(
+                `normwinds: failed to read CSS import "${spec}" from ${sourcePath}: ${error.message}`,
+            );
+        }
+
+        const inlined = await inlineLocalCssImports(importedSource, importedAbs, visited);
+        parts.push(`/* normwinds inlined: ${importedAbs} */\n${inlined}\n`);
+    }
+
+    parts.push(sourceCss.slice(lastIndex));
+    return parts.join("");
+}
+
+async function resolveThemeCssEntry(themeCssPath) {
+    const absPath = path.resolve(process.cwd(), themeCssPath);
+    const entrySource = await fs.readFile(absPath, "utf8");
+    const visited = new Set([absPath]);
+    const resolvedCss = await inlineLocalCssImports(entrySource, absPath, visited);
+    return { absPath, resolvedCss, importedFiles: [...visited] };
+}
+
+// Separate cache for the user-augmented design system used by
+// --suggest-named-theme-vars. Keyed by the absolute themeCssPath so multiple
+// projects in the same Node process never cross-contaminate.
+const augmentedDesignSystemPromises = new Map();
+async function loadAugmentedDesignSystem(themeCssPath) {
+    const absPath = path.resolve(process.cwd(), themeCssPath);
+    let promise = augmentedDesignSystemPromises.get(absPath);
+    if (!promise) {
+        promise = (async () => {
+            const { tailwind } = loadTailwind();
+            const tailwindIndexCssPath = require.resolve("tailwindcss/index.css");
+            const baseCss = await fs.readFile(tailwindIndexCssPath, "utf8");
+            const { resolvedCss, importedFiles } = await resolveThemeCssEntry(themeCssPath);
+
+            // Fail loud when the resolved CSS contains no @theme block. Without
+            // a project @theme there are no forwarders to detect, so silently
+            // returning zero suggestions would mask a misconfiguration. Strip
+            // CSS comments first so a comment that mentions "@theme" doesn't
+            // satisfy the check.
+            const cssWithoutComments = resolvedCss.replace(/\/\*[\s\S]*?\*\//g, "");
+            if (!/@theme\b/.test(cssWithoutComments)) {
+                throw new Error(
+                    `normwinds: --theme-css resolved no @theme block. Inspected ${importedFiles.length} file(s) starting at ${absPath}. Either local @import directives could not be resolved, or the wrong CSS entry was provided.`,
+                );
+            }
+
+            const css = `${baseCss}\n/* normwinds: --theme-css */\n${resolvedCss}`;
+            const themeCssHash = createHash("sha1").update(resolvedCss).digest("hex").slice(0, 12);
+
+            const designSystem = await tailwind.__unstable__loadDesignSystem(css, {
+                from: tailwindIndexCssPath,
+            });
+            return { designSystem, tailwindIndexCssPath, themeCssHash, importedFiles };
+        })();
+        augmentedDesignSystemPromises.set(absPath, promise);
+    }
+    return promise;
+}
+
 // CANONICAL_MEMO stores token -> canonical (equal to token = no change).
 // Pre-populated from on-disk cache; any new entries are persisted on exit.
 const CANONICAL_MEMO = new Map();
@@ -129,6 +241,46 @@ async function saveDiskCache() {
     } catch {
         // Cache persistence is best-effort — never fail the run.
     }
+}
+
+async function loadCanonicalSnapshot() {
+    if (process.env.NORMWIND_DISABLE_CANONICAL_SNAPSHOT === "1") {
+        return false;
+    }
+
+    const paths = [...new Set([CANONICAL_OUTPUT_JSON, BUNDLED_CANONICAL_JSON])];
+    const { tailwindPkg } = loadTailwind();
+
+    for (const snapshotPath of paths) {
+        try {
+            const raw = await fs.readFile(snapshotPath, "utf8");
+            const parsed = JSON.parse(raw);
+
+            if (
+                !parsed ||
+                parsed.source?.tailwindVersion !== tailwindPkg.version ||
+                !Array.isArray(parsed.replacements)
+            ) {
+                continue;
+            }
+
+            for (const replacement of parsed.replacements) {
+                if (
+                    replacement &&
+                    typeof replacement.inputClass === "string" &&
+                    typeof replacement.canonicalClass === "string"
+                ) {
+                    CANONICAL_MEMO.set(replacement.inputClass, replacement.canonicalClass);
+                }
+            }
+
+            return true;
+        } catch {
+            // Try the next snapshot source.
+        }
+    }
+
+    return false;
 }
 
 // Invalidate the in-memory cache if the Tailwind version on disk doesn't match
@@ -181,6 +333,207 @@ function lookupCanonicalFromMemo(candidate) {
         return candidate;
     }
     return CANONICAL_MEMO.get(candidate);
+}
+
+// ---------------------------------------------------------------------------
+// Named theme-var resolver  (opt-in via --suggest-named-theme-vars)
+//
+// Detects classes like `border-(--md-sys-color-outline-variant)` and suggests
+// `border-outline-variant` *only when* the design system has a theme variable
+// (e.g. `--color-outline-variant`) whose value forwards to that root var AND
+// the two classes produce byte-identical CSS. This guarantees zero behavioral
+// regression for the suggested replacement at the moment of analysis.
+// ---------------------------------------------------------------------------
+
+let themeVarResolverPromise = null;
+let themeVarResolverThemeCssPath = null;
+
+// rawTokenInput -> resolved replacement string (or the same input when no safe
+// replacement exists). Stored alongside CANONICAL_MEMO using a key prefix so
+// disk-cache invalidation on Tailwind version change still applies.
+const THEME_VAR_CACHE_PREFIX = "themevar:";
+
+function extractParenVarName(utility) {
+    // Matches the trailing `(--name)` form, with optional `!` prefix the parser
+    // strips earlier. Returns the full `--name` (including leading dashes).
+    const m = /^(?<prefix>[a-z][a-z0-9-]*)-\(--(?<name>[a-z0-9-]+)\)$/i.exec(utility);
+    if (m) {
+        return { utilityPrefix: m.groups.prefix, varName: `--${m.groups.name}` };
+    }
+    const b = /^(?<prefix>[a-z][a-z0-9-]*)-\[var\(--(?<name>[a-z0-9-]+)\)\]$/i.exec(utility);
+    if (b) {
+        return { utilityPrefix: b.groups.prefix, varName: `--${b.groups.name}` };
+    }
+    return null;
+}
+
+// The active resolver's theme-css hash, exposed so the pre-warm step and the
+// hot-loop fallback can compute the same per-project cache namespace. Set
+// when a resolver successfully loads; null when no theme CSS is in play (the
+// resolver then operates against Tailwind's own design system only).
+let activeThemeCssHash = null;
+
+function buildThemeVarCacheKey(rawToken, themeCssHash) {
+    if (themeCssHash) {
+        return `${THEME_VAR_CACHE_PREFIX}${themeCssHash}:${rawToken}`;
+    }
+    return `${THEME_VAR_CACHE_PREFIX}${rawToken}`;
+}
+
+async function getThemeVarResolver({ themeCssPath = null } = {}) {
+    // If the caller passes a different themeCssPath than the cached one, drop
+    // the cached resolver so we rebuild against the new design system.
+    if (themeVarResolverPromise && themeVarResolverThemeCssPath !== themeCssPath) {
+        themeVarResolverPromise = null;
+    }
+    if (!themeVarResolverPromise) {
+        themeVarResolverThemeCssPath = themeCssPath;
+        themeVarResolverPromise = (async () => {
+            validateCacheAgainstTailwindVersion();
+            const augmented = themeCssPath
+                ? await loadAugmentedDesignSystem(themeCssPath)
+                : await loadTailwindDesignSystem();
+            const { designSystem } = augmented;
+            const themeCssHash = augmented.themeCssHash || null;
+            activeThemeCssHash = themeCssHash;
+
+            // Build a map: forwarded-root-var (e.g. `--md-sys-color-outline-variant`)
+            // -> Tailwind theme key (e.g. `--color-outline-variant`).
+            // Only single-step forwarders of the form `var(--x)` (with optional
+            // whitespace) are eligible. Anything more complex is skipped to keep
+            // the equivalence check trivial.
+            const forwardedToThemeKey = new Map();
+            for (const [key, entry] of designSystem.theme.values.entries()) {
+                if (!entry || typeof entry.value !== "string") continue;
+                const m = /^\s*var\(\s*(--[a-z0-9-]+)\s*\)\s*$/i.exec(entry.value);
+                if (!m) continue;
+                const forwarded = m[1];
+                if (forwardedToThemeKey.has(forwarded)) {
+                    // Multiple theme vars forward to the same root var -- ambiguous.
+                    forwardedToThemeKey.set(forwarded, null);
+                } else {
+                    forwardedToThemeKey.set(forwarded, key);
+                }
+            }
+
+            // Build a quick lookup: theme key -> the single var() it forwards
+            // to (e.g. "--color-outline-variant" -> "--md-sys-color-outline-variant").
+            // Only single-var forwarders are stored, matching the population logic
+            // above. Used by the equivalence check to verify the candidate CSS
+            // differs from the original only by substituting `var(--themeKey)`
+            // for `var(--forwarded)`.
+            const themeKeyToForwarded = new Map();
+            for (const [forwarded, themeKey] of forwardedToThemeKey.entries()) {
+                if (typeof themeKey === "string") {
+                    themeKeyToForwarded.set(themeKey, forwarded);
+                }
+            }
+
+            return (rawToken) => {
+                if (!rawToken || typeof rawToken !== "string") return rawToken;
+
+                const cacheKey = buildThemeVarCacheKey(rawToken, themeCssHash);
+                const cached = CANONICAL_MEMO.get(cacheKey);
+                if (cached !== undefined) {
+                    return cached === "" ? rawToken : cached;
+                }
+
+                const recordMiss = () => {
+                    CANONICAL_MEMO.set(cacheKey, "");
+                    diskCacheDirty = true;
+                    return rawToken;
+                };
+
+                const token = parseFixToken(rawToken);
+                const parsed = extractParenVarName(token.utility);
+                if (!parsed) return recordMiss();
+
+                const themeKey = forwardedToThemeKey.get(parsed.varName);
+                if (!themeKey || typeof themeKey !== "string") return recordMiss();
+
+                // Theme keys look like `--<namespace>-<fragment>`. Drop the
+                // namespace to get the fragment used in named utility classes.
+                const fragmentMatch = /^--[a-z0-9]+-(.+)$/i.exec(themeKey);
+                if (!fragmentMatch) return recordMiss();
+                const fragment = fragmentMatch[1];
+                if (!fragment) return recordMiss();
+
+                const candidateUtility = `${parsed.utilityPrefix}-${fragment}`;
+                const candidateRaw = buildFixToken({
+                    variants: token.variants,
+                    utility: candidateUtility,
+                    important: token.important,
+                });
+
+                let originalCss;
+                let candidateCss;
+                try {
+                    originalCss = designSystem.candidatesToCss([token.raw])?.[0] ?? "";
+                    candidateCss = designSystem.candidatesToCss([candidateRaw])?.[0] ?? "";
+                } catch {
+                    return recordMiss();
+                }
+                if (!originalCss || !candidateCss) return recordMiss();
+                if (!cssRuleBodiesAreEquivalent(originalCss, candidateCss, themeKeyToForwarded)) {
+                    return recordMiss();
+                }
+
+                CANONICAL_MEMO.set(cacheKey, candidateRaw);
+                diskCacheDirty = true;
+                return candidateRaw;
+            };
+        })();
+    }
+    return themeVarResolverPromise;
+}
+
+function normalizeCssForCompare(css) {
+    return String(css).replace(/\s+/g, " ").trim();
+}
+
+// Strip the outer selector (everything up to and including the first `{`)
+// and the matching closing `}`, leaving only the rule body. Tailwind's
+// `candidatesToCss` output for a single class always wraps the declarations
+// in exactly one top-level rule.
+function extractCssRuleBody(css) {
+    const text = String(css ?? "");
+    const open = text.indexOf("{");
+    if (open < 0) return "";
+    const close = text.lastIndexOf("}");
+    if (close <= open) return "";
+    return normalizeCssForCompare(text.slice(open + 1, close));
+}
+
+// Compare two Tailwind-generated CSS rule strings (selectors ignored) under
+// the assumption that the only allowed difference is: any `var(--themeKey)`
+// reference in the candidate may be expanded to `var(--forwarded)` per the
+// design system's @theme forwarder. This treats the candidate as
+// runtime-equivalent because `--themeKey: var(--forwarded)` is a CSS custom-
+// property forwarder that re-resolves at every use site.
+function cssRuleBodiesAreEquivalent(originalCss, candidateCss, themeKeyToForwarded) {
+    const a = extractCssRuleBody(originalCss);
+    const b = extractCssRuleBody(candidateCss);
+    if (!a || !b) return false;
+    if (a === b) return true;
+
+    const substituted = b.replace(/var\(\s*(--[a-z0-9-]+)\s*([^)]*)\)/gi, (full, name, rest) => {
+        const forwarded = themeKeyToForwarded.get(name);
+        if (!forwarded) return full;
+        return `var(${forwarded}${rest || ""})`;
+    });
+    return substituted === a;
+}
+
+function lookupThemeVarReplacementFromMemo(rawToken) {
+    if (!rawToken || typeof rawToken !== "string") return undefined;
+    const cached = CANONICAL_MEMO.get(buildThemeVarCacheKey(rawToken, activeThemeCssHash));
+    if (cached === undefined) return undefined;
+    return cached === "" ? rawToken : cached;
+}
+
+function tokenLooksLikeNamedThemeVarCandidate(rawToken) {
+    if (!rawToken || typeof rawToken !== "string") return false;
+    return /-\(--[a-z0-9-]+\)!?$/i.test(rawToken) || /-\[var\(--[a-z0-9-]+\)\]!?$/i.test(rawToken);
 }
 
 const KNOWN_CANONICAL_UTILITY_REPLACEMENTS = new Map([
@@ -286,9 +639,30 @@ const UTILITY_BODY_CANDIDATES_CACHE = new Map();
 function parseArgs(argv) {
     const flags = new Set();
     const patterns = [];
+    const valueFlags = Object.create(null);
 
-    for (const arg of argv) {
+    for (let i = 0; i < argv.length; i += 1) {
+        const arg = argv[i];
+
         if (arg.startsWith("--")) {
+            // Support `--key=value` and `--key value` for value-bearing flags.
+            const eqIdx = arg.indexOf("=");
+            if (eqIdx > 0) {
+                const key = arg.slice(0, eqIdx);
+                const value = arg.slice(eqIdx + 1);
+                valueFlags[key] = value;
+                flags.add(key);
+                continue;
+            }
+
+            const VALUE_FLAGS = new Set(["--theme-css"]);
+            if (VALUE_FLAGS.has(arg) && i + 1 < argv.length && !argv[i + 1].startsWith("--")) {
+                valueFlags[arg] = argv[i + 1];
+                flags.add(arg);
+                i += 1;
+                continue;
+            }
+
             flags.add(arg);
             continue;
         }
@@ -297,14 +671,48 @@ function parseArgs(argv) {
     }
 
     return {
+        checkCanonical: flags.has("--check-canonical"),
         cleanupCanonicalFiles: flags.has("--cleanup-canonical-files"),
         extractCanonical: flags.has("--extract-canonical"),
         fix: flags.has("--fix") || flags.has("--fixall"),
         fixAll: flags.has("--fixall"),
+        help: flags.has("--help") || flags.has("-h"),
         json: flags.has("--json"),
+        suggestNamedThemeVars: flags.has("--suggest-named-theme-vars"),
+        themeCssPath: valueFlags["--theme-css"] || null,
         writeCanonicalFiles: flags.has("--write-canonical-files"),
         patterns,
     };
+}
+
+function printHelp() {
+    console.log(`normwinds v${NORMWINDS_VERSION} - Tailwind shorthand audit + safe autofix
+
+Usage:
+  normwinds [patterns...] [flags]
+
+Flags:
+  --fix                       Auto-fix supported transforms in .vue files
+  --fixall                    Auto-fix in all matched files (.vue/.js/.mjs/.ts/.jsx/.tsx)
+  --json                      Emit findings as JSON
+  --suggest-named-theme-vars  (opt-in) Suggest replacing
+                              \`utility-(--md-sys-color-x)\` with the project's
+                              named theme class (e.g. \`utility-x\`) when the
+                              project's @theme defines a forwarder. Requires
+                              --theme-css.
+  --theme-css <path>          Path to the project's Tailwind entry CSS that
+                              contains the @theme block. Used together with
+                              --suggest-named-theme-vars to detect forwarders.
+  --extract-canonical         (maintenance) Rebuild the canonical replacement
+                              reference data.
+  --check-canonical           (CI) Exit non-zero if the bundled canonical
+                              replacement artifacts are stale relative to the
+                              installed Tailwind version.
+  --write-canonical-files     Persist the extracted reference data to
+                              docs/reference/canonical-replacements.{json,md}
+  --cleanup-canonical-files   Remove the persisted reference data
+  -h, --help                  Show this help and exit
+`);
 }
 
 function buildFamilyBodyIndex(families) {
@@ -474,7 +882,7 @@ function addCanonicalReplacement(replacements, inputClass, canonicalClass, sourc
     }
 }
 
-async function extractCanonicalReplacements({ writeFiles }) {
+async function extractCanonicalReplacements({ writeFiles, checkOnly = false }) {
     const { designSystem, tailwindIndexCssPath } = await loadTailwindDesignSystem();
     const { tailwindPkg } = loadTailwind();
 
@@ -542,7 +950,6 @@ async function extractCanonicalReplacements({ writeFiles }) {
 
     const payload = {
         toolVersion: NORMWINDS_VERSION,
-        generatedAt: new Date().toISOString(),
         source: {
             engine: "tailwindcss.designSystem.canonicalizeCandidates",
             tailwindVersion: tailwindPkg.version,
@@ -570,7 +977,6 @@ async function extractCanonicalReplacements({ writeFiles }) {
         `- Normwinds version: \`${NORMWINDS_VERSION}\``,
         "- Source engine: `tailwindcss.designSystem.canonicalizeCandidates`",
         `- Tailwind version: \`${tailwindPkg.version}\``,
-        `- Generated at: \`${payload.generatedAt}\``,
         `- Class list scanned: \`${classList.length}\``,
         `- Canonical replacements extracted: \`${replacements.length}\``,
         "",
@@ -613,11 +1019,32 @@ async function extractCanonicalReplacements({ writeFiles }) {
         "- `docs/reference/canonical-replacements.json`",
     );
 
+    const jsonText = `${JSON.stringify(payload, null, 2)}\n`;
+    const markdownText = `${markdownLines.join("\n")}\n`;
+
+    if (checkOnly) {
+        const [existingJson, existingMarkdown] = await Promise.all([
+            fs.readFile(CANONICAL_OUTPUT_JSON, "utf8").catch(() => null),
+            fs.readFile(CANONICAL_OUTPUT_MD, "utf8").catch(() => null),
+        ]);
+
+        if (existingJson !== jsonText || existingMarkdown !== markdownText) {
+            console.error("normwinds: canonical replacement artifacts are out of date.");
+            console.error("Run `normwind --extract-canonical --write-canonical-files` and commit the generated files.");
+            process.exitCode = 1;
+            return;
+        }
+
+        console.log(`normwinds v${NORMWINDS_VERSION}: canonical replacement artifacts are up to date.`);
+        return;
+    }
+
     console.log(`normwinds v${NORMWINDS_VERSION}: extracted ${replacements.length} canonical replacement(s).`);
 
     if (writeFiles) {
-        await fs.writeFile(CANONICAL_OUTPUT_JSON, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-        await fs.writeFile(CANONICAL_OUTPUT_MD, `${markdownLines.join("\n")}\n`, "utf8");
+        await fs.mkdir(path.dirname(CANONICAL_OUTPUT_JSON), { recursive: true });
+        await fs.writeFile(CANONICAL_OUTPUT_JSON, jsonText, "utf8");
+        await fs.writeFile(CANONICAL_OUTPUT_MD, markdownText, "utf8");
         console.log(`  wrote ${path.relative(process.cwd(), CANONICAL_OUTPUT_JSON)}`);
         console.log(`  wrote ${path.relative(process.cwd(), CANONICAL_OUTPUT_MD)}`);
         return;
@@ -915,7 +1342,11 @@ function looksLikeFixableClassString(content, { allowSingleTokenCanonical = fals
     if (classLikeTokens.length === 1) {
         const token = classLikeTokens[0];
         return Boolean(
-            (allowSingleTokenCanonical && (token.includes("[") || getKnownCanonicalClass(token))) ||
+            (allowSingleTokenCanonical && (
+                token.includes("[") ||
+                token.includes("(--") ||
+                getKnownCanonicalClass(token)
+            )) ||
             (token.startsWith("!") && !token.endsWith("!")) ||
             /:[!]/.test(token),
         );
@@ -924,7 +1355,7 @@ function looksLikeFixableClassString(content, { allowSingleTokenCanonical = fals
     return false;
 }
 
-function transformFixableClassContent(content, canonicalizeCandidate) {
+function transformFixableClassContent(content, canonicalizeCandidate, themeVarResolver = null) {
     const leading = (content.match(/^\s+/) ?? [""])[0];
     const trailing = (content.match(/\s+$/) ?? [""])[0];
     const middle = content.trim();
@@ -954,14 +1385,24 @@ function transformFixableClassContent(content, canonicalizeCandidate) {
             changed = true;
         }
 
-        if (!isLikelyFixUtility(tokens[i]) || !canonicalizeCandidate) {
+        if (!isLikelyFixUtility(tokens[i])) {
             continue;
         }
 
-        const canonical = canonicalizeCandidate(tokens[i]);
-        if (canonical && canonical !== tokens[i]) {
-            tokens[i] = canonical;
-            changed = true;
+        if (canonicalizeCandidate) {
+            const canonical = canonicalizeCandidate(tokens[i]);
+            if (canonical && canonical !== tokens[i]) {
+                tokens[i] = canonical;
+                changed = true;
+            }
+        }
+
+        if (themeVarResolver && tokenLooksLikeNamedThemeVarCandidate(tokens[i])) {
+            const replacement = themeVarResolver(tokens[i]);
+            if (replacement && replacement !== tokens[i]) {
+                tokens[i] = replacement;
+                changed = true;
+            }
         }
     }
 
@@ -993,7 +1434,10 @@ function transformFixableClassContent(content, canonicalizeCandidate) {
     return `${leading}${tokens.join(" ")}${trailing}`;
 }
 
-function applyFixesToText(text, canonicalizeCandidate, { allowSingleTokenCanonical = false } = {}) {
+function applyFixesToText(text, canonicalizeCandidate, {
+    allowSingleTokenCanonical = false,
+    themeVarResolver = null,
+} = {}) {
     let changed = false;
 
     const transformQuotedStrings = (input, regex, quote) =>
@@ -1002,7 +1446,7 @@ function applyFixesToText(text, canonicalizeCandidate, { allowSingleTokenCanonic
                 return full;
             }
 
-            const next = transformFixableClassContent(content, canonicalizeCandidate);
+            const next = transformFixableClassContent(content, canonicalizeCandidate, themeVarResolver);
             if (next === content) {
                 return full;
             }
@@ -1019,8 +1463,19 @@ function applyFixesToText(text, canonicalizeCandidate, { allowSingleTokenCanonic
     return { changed, transformed };
 }
 
-async function applyFixes(filePaths, { fixAll = false } = {}) {
+async function applyFixes(filePaths, { fixAll = false, suggestNamedThemeVars = false, themeCssPath = null } = {}) {
     let changedFiles = 0;
+
+    // When the user opted into named-theme-var suggestions, resolve the theme
+    // CSS once up front so misconfiguration surfaces as a single, loud error
+    // rather than a silent per-file no-op.
+    let sharedThemeVarResolver = null;
+    if (suggestNamedThemeVars) {
+        sharedThemeVarResolver = await getThemeVarResolver({ themeCssPath }).catch((error) => {
+            console.error(error?.message || String(error));
+            return null;
+        });
+    }
 
     for (const filePath of filePaths) {
         if (!fixAll && !filePath.endsWith(".vue")) {
@@ -1037,8 +1492,12 @@ async function applyFixes(filePaths, { fixAll = false } = {}) {
         const canonicalizeCandidate = sourceText.includes("[")
             ? await getCanonicalizeCandidate().catch(() => null)
             : null;
+        const themeVarResolver = sharedThemeVarResolver && /\(--|\[var\(--/.test(sourceText)
+            ? sharedThemeVarResolver
+            : null;
         const { changed, transformed } = applyFixesToText(sourceText, canonicalizeCandidate, {
             allowSingleTokenCanonical: filePath.endsWith(".vue"),
+            themeVarResolver,
         });
         if (!changed) {
             continue;
@@ -1362,7 +1821,11 @@ function extractClassLikeStrings(sourceText, { allowSingleTokenCanonical = false
             if (
                 singleToken &&
                 !(
-                    (allowSingleTokenCanonical && (value.includes("[") || getKnownCanonicalClass(value))) ||
+                    (allowSingleTokenCanonical && (
+                        value.includes("[") ||
+                        value.includes("(--") ||
+                        getKnownCanonicalClass(value)
+                    )) ||
                     value.startsWith("!") ||
                     value.includes(":!")
                 )
@@ -1611,12 +2074,17 @@ async function runWithConcurrency(items, concurrency, worker) {
 // are never canonicalized because Tailwind's canonicalizer is a no-op for them
 // (verified empirically: 0/27,060 non-arbitrary tokens changed in this
 // codebase). This removes the majority of Tailwind design-system calls.
-async function collectStaticShorthandFindings(filePaths) {
+async function collectStaticShorthandFindings(filePaths, { suggestNamedThemeVars = false, themeCssPath = null } = {}) {
     // Pass 1: read every file, extract class snippets, collect unique arbitrary
     // tokens across the entire set for a single batched canonicalization.
     const fileContexts = new Array(filePaths.length);
     const uniqueArbitraryRaws = new Set();
-    const arbitraryTokenRegex = /(?:^|\s)((?:[a-z0-9-]+:)*!?[a-z][a-z0-9-]*-\[[^\]\s]+\]!?)(?=\s|$)/gi;
+    const uniqueThemeVarRaws = new Set();
+    // Matches:
+    //   - bracket arbitrary form:    `[a-z][a-z0-9-]*-[ ... ]`
+    //   - paren CSS-var form:        `[a-z][a-z0-9-]*-(--name)`
+    //   - bracket-var form:          `[a-z][a-z0-9-]*-[var(--name)]`  (already covered by the bracket arm)
+    const arbitraryTokenRegex = /(?:^|\s)((?:[a-z0-9-]+:)*!?[a-z][a-z0-9-]*-(?:\[[^\]\s]+\]|\(--[a-z0-9-]+\))!?)(?=\s|$)/gi;
 
     await runWithConcurrency(filePaths, FILE_SCAN_CONCURRENCY, async (filePath, idx) => {
         let sourceText;
@@ -1640,18 +2108,23 @@ async function collectStaticShorthandFindings(filePaths) {
             return;
         }
 
-        // Collect arbitrary raw tokens (containing `[`) for global batch
-        // canonicalization. Also note which snippets need the canonicalizer.
+        // Collect arbitrary raw tokens (containing `[` or `(--`) for global
+        // batch canonicalization. Also note which snippets need the
+        // canonicalizer / theme-var resolver.
         const perSnippetArbitraryRaws = new Array(snippets.length);
         let hasAnyArbitrary = false;
         for (let i = 0; i < snippets.length; i++) {
             const snippet = snippets[i];
-            if (!snippet.value.includes("[")) {
+            const hasBracket = snippet.value.includes("[");
+            const hasParenVar = suggestNamedThemeVars && snippet.value.includes("(--");
+            if (!hasBracket && !hasParenVar) {
                 perSnippetArbitraryRaws[i] = null;
                 continue;
             }
 
-            hasAnyArbitrary = true;
+            if (hasBracket) {
+                hasAnyArbitrary = true;
+            }
             arbitraryTokenRegex.lastIndex = 0;
             let match;
             const raws = [];
@@ -1661,7 +2134,12 @@ async function collectStaticShorthandFindings(filePaths) {
                     raw,
                     snippetOffset: match.index + match[0].lastIndexOf(raw),
                 });
-                uniqueArbitraryRaws.add(raw);
+                if (raw.includes("[")) {
+                    uniqueArbitraryRaws.add(raw);
+                }
+                if (suggestNamedThemeVars && tokenLooksLikeNamedThemeVarCandidate(raw)) {
+                    uniqueThemeVarRaws.add(raw);
+                }
             }
             perSnippetArbitraryRaws[i] = raws;
         }
@@ -1672,6 +2150,7 @@ async function collectStaticShorthandFindings(filePaths) {
             snippets,
             perSnippetArbitraryRaws,
             hasAnyArbitrary,
+            hasAnyThemeVarCandidate: suggestNamedThemeVars && sourceText.includes("(--"),
         };
     });
 
@@ -1694,6 +2173,25 @@ async function collectStaticShorthandFindings(filePaths) {
         }
     }
 
+    // Pre-warm theme-var replacements (opt-in). Only when at least one
+    // candidate token exists, to avoid loading the design system needlessly.
+    // The resolver is loaded first so we know the active themeCssHash before
+    // probing the on-disk cache; otherwise stale misses recorded under a
+    // different theme CSS could be silently reused.
+    if (suggestNamedThemeVars && uniqueThemeVarRaws.size > 0) {
+        const themeVarResolver = await getThemeVarResolver({ themeCssPath }).catch((error) => {
+            console.error(error?.message || String(error));
+            return null;
+        });
+        if (themeVarResolver) {
+            for (const raw of uniqueThemeVarRaws) {
+                if (!CANONICAL_MEMO.has(buildThemeVarCacheKey(raw, activeThemeCssHash))) {
+                    themeVarResolver(raw);
+                }
+            }
+        }
+    }
+
     // Pass 2: per-file scanning. Canonicalize lookups now hit the pre-warmed
     // memo, so no further design-system work happens in the hot loop.
     const perFileFindings = await runWithConcurrency(fileContexts, FILE_SCAN_CONCURRENCY, async (ctx) => {
@@ -1701,7 +2199,7 @@ async function collectStaticShorthandFindings(filePaths) {
             return [];
         }
 
-        const { filePath, sourceText, snippets, perSnippetArbitraryRaws, hasAnyArbitrary } = ctx;
+        const { filePath, sourceText, snippets, perSnippetArbitraryRaws, hasAnyArbitrary, hasAnyThemeVarCandidate } = ctx;
         const relativePath = toRelative(filePath);
         const localFound = new Map();
 
@@ -1726,21 +2224,45 @@ async function collectStaticShorthandFindings(filePaths) {
             }
         }
 
+        let themeVarLookup = null;
+        if (suggestNamedThemeVars && hasAnyThemeVarCandidate) {
+            if (themeVarResolverPromise) {
+                themeVarLookup = await themeVarResolverPromise.catch(() => null);
+            } else {
+                themeVarLookup = lookupThemeVarReplacementFromMemo;
+            }
+        }
+
         for (let si = 0; si < snippets.length; si++) {
             const snippet = snippets[si];
             const arbitraryRaws = perSnippetArbitraryRaws[si];
 
-            if (arbitraryRaws && arbitraryRaws.length > 0 && canonicalizeCandidate) {
+            if (arbitraryRaws && arbitraryRaws.length > 0) {
                 const ls = ensureLineStarts();
                 for (const { raw, snippetOffset } of arbitraryRaws) {
-                    const tailwindCanonical = canonicalizeCandidate(raw);
-                    if (tailwindCanonical && tailwindCanonical !== raw) {
+                    let suggestion = null;
+
+                    if (canonicalizeCandidate && raw.includes("[")) {
+                        const tailwindCanonical = canonicalizeCandidate(raw);
+                        if (tailwindCanonical && tailwindCanonical !== raw) {
+                            suggestion = tailwindCanonical;
+                        }
+                    }
+
+                    if (!suggestion && themeVarLookup && tokenLooksLikeNamedThemeVarCandidate(raw)) {
+                        const themeReplacement = themeVarLookup(raw);
+                        if (themeReplacement && themeReplacement !== raw) {
+                            suggestion = themeReplacement;
+                        }
+                    }
+
+                    if (suggestion) {
                         const { line, column } = indexToLineCol(ls, snippet.index + snippetOffset);
                         maybePushFinding(localFound, {
                             filePath: relativePath,
                             line,
                             column,
-                            message: `The class '${raw}' can be written as '${tailwindCanonical}'`,
+                            message: `The class '${raw}' can be written as '${suggestion}'`,
                         });
                     }
                 }
@@ -1829,18 +2351,40 @@ function printTextReport(findings, lintedFiles) {
 
 async function main() {
     const {
+        checkCanonical,
         cleanupCanonicalFiles,
         extractCanonical,
         fix,
         fixAll,
+        help,
         json,
         patterns,
+        suggestNamedThemeVars,
+        themeCssPath,
         writeCanonicalFiles,
     } = parseArgs(process.argv.slice(2));
+
+    if (help) {
+        printHelp();
+        return;
+    }
+
+    if (suggestNamedThemeVars && !themeCssPath) {
+        console.error(
+            "normwinds: --suggest-named-theme-vars requires --theme-css <path-to-project-tailwind.css>.",
+        );
+        process.exitCode = 2;
+        return;
+    }
 
     if (cleanupCanonicalFiles) {
         await cleanupCanonicalArtifacts();
         console.log(`normwinds v${NORMWINDS_VERSION}: removed canonical generated artifacts (if present).`);
+        return;
+    }
+
+    if (checkCanonical) {
+        await extractCanonicalReplacements({ writeFiles: false, checkOnly: true });
         return;
     }
 
@@ -1851,14 +2395,17 @@ async function main() {
 
     const [filePaths] = await Promise.all([
         listTargetFiles(patterns),
-        loadDiskCache(),
+        (async () => {
+            await loadDiskCache();
+            await loadCanonicalSnapshot();
+        })(),
     ]);
 
     if (fix) {
-        await applyFixes(filePaths, { fixAll });
+        await applyFixes(filePaths, { fixAll, suggestNamedThemeVars, themeCssPath });
     }
 
-    const findings = await collectStaticShorthandFindings(filePaths);
+    const findings = await collectStaticShorthandFindings(filePaths, { suggestNamedThemeVars, themeCssPath });
 
     await saveDiskCache();
 
