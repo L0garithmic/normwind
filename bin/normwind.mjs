@@ -355,14 +355,24 @@ const THEME_VAR_CACHE_PREFIX = "themevar:";
 
 function extractParenVarName(utility) {
     // Matches the trailing `(--name)` form, with optional `!` prefix the parser
-    // strips earlier. Returns the full `--name` (including leading dashes).
-    const m = /^(?<prefix>[a-z][a-z0-9-]*)-\(--(?<name>[a-z0-9-]+)\)$/i.exec(utility);
+    // strips earlier and an optional `/<modifier>` suffix (e.g. `/40` opacity).
+    // The modifier is preserved verbatim so the resolver can rebuild
+    // `border-(--color-ink-400)/40` -> `border-ink-400/40` with byte-identical CSS.
+    const m = /^(?<prefix>[a-z][a-z0-9-]*)-\(--(?<name>[a-z0-9-]+)\)(?<modifier>\/[^\s]+)?$/i.exec(utility);
     if (m) {
-        return { utilityPrefix: m.groups.prefix, varName: `--${m.groups.name}` };
+        return {
+            utilityPrefix: m.groups.prefix,
+            varName: `--${m.groups.name}`,
+            modifier: m.groups.modifier ?? "",
+        };
     }
-    const b = /^(?<prefix>[a-z][a-z0-9-]*)-\[var\(--(?<name>[a-z0-9-]+)\)\]$/i.exec(utility);
+    const b = /^(?<prefix>[a-z][a-z0-9-]*)-\[var\(--(?<name>[a-z0-9-]+)\)\](?<modifier>\/[^\s]+)?$/i.exec(utility);
     if (b) {
-        return { utilityPrefix: b.groups.prefix, varName: `--${b.groups.name}` };
+        return {
+            utilityPrefix: b.groups.prefix,
+            varName: `--${b.groups.name}`,
+            modifier: b.groups.modifier ?? "",
+        };
     }
     return null;
 }
@@ -448,7 +458,27 @@ async function getThemeVarResolver({ themeCssPath = null } = {}) {
                 const parsed = extractParenVarName(token.utility);
                 if (!parsed) return recordMiss();
 
-                const themeKey = forwardedToThemeKey.get(parsed.varName);
+                // Resolve `parsed.varName` to a Tailwind theme key. Two pathways:
+                //   1. Forwarder pattern: user authored a root var that the design
+                //      system forwards from a Tailwind-namespaced theme var
+                //      (`--color-x: var(--md-sys-color-x)` -> author writes
+                //      `--md-sys-color-x`, theme key is `--color-x`).
+                //   2. Direct pattern: user authored the theme key itself
+                //      (`--color-ink-400` is registered in @theme; author writes
+                //      `border-(--color-ink-400)`, theme key is `--color-ink-400`).
+                // Both reduce to "theme key whose namespace prefix is dropped to
+                // form the named-utility fragment". The Tailwind-generated CSS
+                // body is byte-identical for both forms when the candidate is
+                // valid, and `candidatesToCss` returns undefined when the
+                // candidate is not a valid utility -- so the equivalence check
+                // is the safety gate for both pathways.
+                let themeKey = forwardedToThemeKey.get(parsed.varName);
+                if (!themeKey || typeof themeKey !== "string") {
+                    const direct = designSystem.theme.values.get(parsed.varName);
+                    if (direct && typeof direct.value === "string") {
+                        themeKey = parsed.varName;
+                    }
+                }
                 if (!themeKey || typeof themeKey !== "string") return recordMiss();
 
                 // Theme keys look like `--<namespace>-<fragment>`. Drop the
@@ -458,7 +488,7 @@ async function getThemeVarResolver({ themeCssPath = null } = {}) {
                 const fragment = fragmentMatch[1];
                 if (!fragment) return recordMiss();
 
-                const candidateUtility = `${parsed.utilityPrefix}-${fragment}`;
+                const candidateUtility = `${parsed.utilityPrefix}-${fragment}${parsed.modifier}`;
                 const candidateRaw = buildFixToken({
                     variants: token.variants,
                     utility: candidateUtility,
@@ -533,7 +563,14 @@ function lookupThemeVarReplacementFromMemo(rawToken) {
 
 function tokenLooksLikeNamedThemeVarCandidate(rawToken) {
     if (!rawToken || typeof rawToken !== "string") return false;
-    return /-\(--[a-z0-9-]+\)!?$/i.test(rawToken) || /-\[var\(--[a-z0-9-]+\)\]!?$/i.test(rawToken);
+    // Accept an optional trailing `/<modifier>` (e.g. opacity) and an optional
+    // trailing `!` important marker. Both forms are valid Tailwind syntax and
+    // must round-trip through the resolver to keep parity between
+    // `border-(--color-x)/40` and `border-x/40`.
+    return (
+        /-\(--[a-z0-9-]+\)(?:\/[^\s!]+)?!?$/i.test(rawToken) ||
+        /-\[var\(--[a-z0-9-]+\)\](?:\/[^\s!]+)?!?$/i.test(rawToken)
+    );
 }
 
 const KNOWN_CANONICAL_UTILITY_REPLACEMENTS = new Map([
@@ -695,14 +732,18 @@ Flags:
   --fix                       Auto-fix supported transforms in .vue files
   --fixall                    Auto-fix in all matched files (.vue/.js/.mjs/.ts/.jsx/.tsx)
   --json                      Emit findings as JSON
-  --suggest-named-theme-vars  (opt-in) Suggest replacing
-                              \`utility-(--md-sys-color-x)\` with the project's
-                              named theme class (e.g. \`utility-x\`) when the
-                              project's @theme defines a forwarder. Requires
-                              --theme-css.
+  --suggest-named-theme-vars  (opt-in, audit only) Emit findings that suggest
+                              replacing \`utility-(--var)\` and
+                              \`utility-[var(--var)]\` with the named-utility
+                              form (e.g. \`utility-name\`) when the project's
+                              @theme registers \`--var\` directly or forwards to
+                              it. Requires --theme-css. During --fix/--fixall,
+                              the same replacements are applied automatically
+                              whenever --theme-css is set; safety is gated by
+                              per-token CSS equivalence.
   --theme-css <path>          Path to the project's Tailwind entry CSS that
-                              contains the @theme block. Used together with
-                              --suggest-named-theme-vars to detect forwarders.
+                              contains the @theme block. Used to detect
+                              registered theme variables and forwarders.
   --extract-canonical         (maintenance) Rebuild the canonical replacement
                               reference data.
   --check-canonical           (CI) Exit non-zero if the bundled canonical
@@ -1169,12 +1210,28 @@ function buildFixToken({ variants, utility, important }) {
     return `${variants}${utility}${important ? "!" : ""}`;
 }
 
+// Strip the contents of every `[...]` and `(...)` segment so that operator
+// characters which are valid inside Tailwind arbitrary-value or theme-var
+// brackets (e.g. `data-[state=open]`, `[&>svg]`, `(--my-var)`) are not
+// mistaken for JSX/JS expression syntax outside the brackets.
+function stripBracketedSegments(input) {
+    if (typeof input !== "string" || input.length === 0) {
+        return input ?? "";
+    }
+    return input.replace(/\[[^\]]*\]/g, "[]").replace(/\([^)]*\)/g, "()");
+}
+
 function isLikelyFixUtility(raw) {
     if (!raw) {
         return false;
     }
 
-    if (/[=><&|?,'"`*]/.test(raw)) {
+    // Operator characters are only disqualifying when they appear OUTSIDE of
+    // arbitrary-value brackets. Tokens like `data-[state=open]:bg-red-500`,
+    // `[&>svg]:size-4`, or `border-(--color-x)/40` are all legitimate
+    // Tailwind utilities and must not be filtered out here.
+    const stripped = stripBracketedSegments(raw);
+    if (/[=><&|?,'"`*]/.test(stripped)) {
         return false;
     }
 
@@ -1266,16 +1323,27 @@ function mergeFixPair(tokens, firstBody, secondBody, targetBody) {
 function mergeFixWidthHeight(tokens) {
     let changed = false;
 
+    // Match a `w-X`/`h-X` pair regardless of authoring order. The previous
+    // implementation only collapsed `w-X h-X`, silently leaving any
+    // `h-X w-X` pair behind because the inner loop scanned forward from the
+    // width index. We now scan every position for the first axis token and
+    // pair it with any matching counterpart anywhere else in the array.
     for (let i = 0; i < tokens.length; i += 1) {
         const a = parseFixToken(tokens[i]);
-        const aMatch = matchFixBodyValue(a.utility, "w");
+        const aWidth = matchFixBodyValue(a.utility, "w");
+        const aHeight = matchFixBodyValue(a.utility, "h");
+        const aMatch = aWidth ?? aHeight;
         if (!aMatch || aMatch.negative) {
             continue;
         }
+        const counterpartBody = aWidth ? "h" : "w";
 
-        for (let j = i + 1; j < tokens.length; j += 1) {
+        for (let j = 0; j < tokens.length; j += 1) {
+            if (j === i) {
+                continue;
+            }
             const b = parseFixToken(tokens[j]);
-            const bMatch = matchFixBodyValue(b.utility, "h");
+            const bMatch = matchFixBodyValue(b.utility, counterpartBody);
             if (!bMatch || bMatch.negative) {
                 continue;
             }
@@ -1295,8 +1363,13 @@ function mergeFixWidthHeight(tokens) {
                 important: a.important,
             });
 
+            // Preserve the position of the earlier token so unrelated
+            // utilities keep their relative order in the output.
+            const firstIdx = Math.min(i, j);
+            const secondIdx = Math.max(i, j);
+
             const existingTarget = tokens.some((token, index) => {
-                if (index === i || index === j) {
+                if (index === firstIdx || index === secondIdx) {
                     return false;
                 }
 
@@ -1308,11 +1381,11 @@ function mergeFixWidthHeight(tokens) {
                 );
             });
 
-            tokens[i] = targetRaw;
-            tokens.splice(j, 1);
+            tokens[firstIdx] = targetRaw;
+            tokens.splice(secondIdx, 1);
 
             if (existingTarget) {
-                tokens.splice(i, 1);
+                tokens.splice(firstIdx, 1);
             }
 
             changed = true;
@@ -1325,7 +1398,12 @@ function mergeFixWidthHeight(tokens) {
 }
 
 function looksLikeFixableClassString(content, { allowSingleTokenCanonical = false } = {}) {
-    if (/[=><&|?]/.test(content)) {
+    // Operator characters that hint at JSX/JS expressions are only
+    // disqualifying when they appear OUTSIDE of Tailwind's arbitrary-value
+    // brackets (`[...]`) or theme-var parens (`(...)`). A class string
+    // containing `data-[state=open]:text-...` or `hover:text-(--color-x)`
+    // is still a plain class string and must be considered fixable.
+    if (/[=><&|?]/.test(stripBracketedSegments(content))) {
         return false;
     }
 
@@ -1466,11 +1544,14 @@ function applyFixesToText(text, canonicalizeCandidate, {
 async function applyFixes(filePaths, { fixAll = false, suggestNamedThemeVars = false, themeCssPath = null } = {}) {
     let changedFiles = 0;
 
-    // When the user opted into named-theme-var suggestions, resolve the theme
-    // CSS once up front so misconfiguration surfaces as a single, loud error
-    // rather than a silent per-file no-op.
+    // Resolve the theme CSS once up front so misconfiguration surfaces as a
+    // single, loud error rather than a silent per-file no-op. The resolver is
+    // engaged whenever the user supplied --theme-css OR explicitly opted into
+    // suggestions; the safety gate during fix mode is the per-token CSS
+    // equivalence check, not the flag, so we don't require the explicit
+    // suggestion flag at fix time.
     let sharedThemeVarResolver = null;
-    if (suggestNamedThemeVars) {
+    if (suggestNamedThemeVars || themeCssPath) {
         sharedThemeVarResolver = await getThemeVarResolver({ themeCssPath }).catch((error) => {
             console.error(error?.message || String(error));
             return null;
@@ -2114,7 +2195,10 @@ async function collectStaticShorthandFindings(filePaths, { suggestNamedThemeVars
     //   - bracket arbitrary form:    `[a-z][a-z0-9-]*-[ ... ]`
     //   - paren CSS-var form:        `[a-z][a-z0-9-]*-(--name)`
     //   - bracket-var form:          `[a-z][a-z0-9-]*-[var(--name)]`  (already covered by the bracket arm)
-    const arbitraryTokenRegex = /(?:^|\s)((?:[a-z0-9-]+:)*!?[a-z][a-z0-9-]*-(?:\[[^\]\s]+\]|\(--[a-z0-9-]+\))!?)(?=\s|$)/gi;
+    // An optional trailing `/<modifier>` (e.g. opacity `/40`) is captured so
+    // tokens like `border-[var(--color-ink-400)]/40` reach the canonicalizer
+    // and named-theme-var resolver intact.
+    const arbitraryTokenRegex = /(?:^|\s)((?:[a-z0-9-]+:)*!?[a-z][a-z0-9-]*-(?:\[[^\]\s]+\]|\(--[a-z0-9-]+\))(?:\/[^\s]+)?!?)(?=\s|$)/gi;
 
     await runWithConcurrency(filePaths, FILE_SCAN_CONCURRENCY, async (filePath, idx) => {
         let sourceText;
@@ -2279,9 +2363,16 @@ async function collectStaticShorthandFindings(filePaths, { suggestNamedThemeVars
                         }
                     }
 
-                    if (!suggestion && themeVarLookup && tokenLooksLikeNamedThemeVarCandidate(raw)) {
-                        const themeReplacement = themeVarLookup(raw);
-                        if (themeReplacement && themeReplacement !== raw) {
+                    // Chain canonicalize -> named-theme-var. When Tailwind
+                    // canonicalizes `border-[var(--x)]/40` to `border-(--x)/40`,
+                    // the resolver should still get a chance to collapse the
+                    // var ref to the named utility (`border-x/40`). Operate on
+                    // the post-canonical string so the final emitted suggestion
+                    // is the most specific one we can prove safe.
+                    const themeInput = suggestion ?? raw;
+                    if (themeVarLookup && tokenLooksLikeNamedThemeVarCandidate(themeInput)) {
+                        const themeReplacement = themeVarLookup(themeInput);
+                        if (themeReplacement && themeReplacement !== themeInput) {
                             suggestion = themeReplacement;
                         }
                     }

@@ -31,7 +31,6 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-
 # --------------------------------------------------------------------------- #
 # Paths                                                                        #
 # --------------------------------------------------------------------------- #
@@ -185,7 +184,8 @@ def npm_publish(npm_token: str) -> None:
         npm_args = [
             "publish",
             f"--registry={NPM_REGISTRY}",
-            "--access", "public",
+            "--access",
+            "public",
             f"--userconfig={tmp_npmrc}",
         ]
         if sys.platform == "win32":

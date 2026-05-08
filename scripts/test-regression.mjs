@@ -205,6 +205,27 @@ function diffSummary(label, expected, actual) {
     return `  ${label}: MISMATCH\n    expected: ${JSON.stringify(expected)}\n    actual:   ${JSON.stringify(actual)}`;
 }
 
+// Some fixtures need extra CLI flags (e.g. --theme-css). Convention: any
+// fixture directory containing a theme.css file is run with that file as the
+// --theme-css argument and (for the audit pass) with --suggest-named-theme-vars
+// so the resolver is exercised end-to-end. Audit gating for the suggestion
+// flag is intentional -- it's the existing public contract; fix-time engages
+// the resolver automatically whenever --theme-css is set.
+async function fixtureExtraArgs(fixtureDir, mode) {
+    const themeCssPath = path.join(fixtureDir, "theme.css");
+    try {
+        await fs.access(themeCssPath);
+    } catch {
+        return [];
+    }
+    const tmpThemePath = path.join(fixtureDir, "theme.css");
+    const args = ["--theme-css", tmpThemePath];
+    if (mode === "audit") {
+        args.push("--suggest-named-theme-vars");
+    }
+    return args;
+}
+
 async function runAudit(fixtureDir, fixture, options) {
     const input = await findInputFile(fixtureDir);
     if (!input) {
@@ -212,8 +233,9 @@ async function runAudit(fixtureDir, fixture, options) {
     }
 
     const tmpDir = await copyFixtureToTmp(fixtureDir, input.name);
+    const extraArgs = await fixtureExtraArgs(fixtureDir, "audit");
     try {
-        const { exitCode, stdout, stderr } = await runNormwind(["--json"], tmpDir);
+        const { exitCode, stdout, stderr } = await runNormwind(["--json", ...extraArgs], tmpDir);
         const parsed = parseFindingsJson(stdout);
         if (!parsed) {
             return {
@@ -247,8 +269,9 @@ async function runFixVariant(fixtureDir, fixture, fixFlag, expectedSuffix, optio
         return { ok: false, label: fixFlag, error: "no input.* file in fixture" };
     }
     const tmpDir = await copyFixtureToTmp(fixtureDir, input.name);
+    const extraArgs = await fixtureExtraArgs(fixtureDir, "fix");
     try {
-        const { exitCode, stderr } = await runNormwind([fixFlag, "--json"], tmpDir);
+        const { exitCode, stderr } = await runNormwind([fixFlag, "--json", ...extraArgs], tmpDir);
         const writtenPath = path.join(tmpDir, input.name);
         const actualText = await readTextIfExists(writtenPath);
         if (actualText === null) {

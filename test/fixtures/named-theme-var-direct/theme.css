@@ -1,0 +1,11 @@
+@import 'tailwindcss';
+
+@theme {
+	--color-ink-100: var(--color-zinc-100);
+	--color-ink-300: var(--color-zinc-300);
+	--color-ink-400: var(--color-zinc-400);
+	--color-ink-700: var(--color-zinc-700);
+	--color-ink-900: var(--color-zinc-900);
+	--color-ink-1000: var(--color-zinc-950);
+	--color-brand-200: var(--color-sky-200);
+}

@@ -1,0 +1,55 @@
+{
+  "ruleId": "tailwindcss/enforces-shorthand",
+  "lintedFiles": 1,
+  "findingCount": 8,
+  "findings": [
+    {
+      "filePath": "input.vue",
+      "line": 2,
+      "column": 17,
+      "message": "The class 'border-[var(--color-ink-400)]/40' can be written as 'border-ink-400/40'"
+    },
+    {
+      "filePath": "input.vue",
+      "line": 2,
+      "column": 50,
+      "message": "The class 'text-(--color-ink-700)' can be written as 'text-ink-700'"
+    },
+    {
+      "filePath": "input.vue",
+      "line": 2,
+      "column": 73,
+      "message": "The class 'bg-(--color-ink-100)' can be written as 'bg-ink-100'"
+    },
+    {
+      "filePath": "input.vue",
+      "line": 3,
+      "column": 19,
+      "message": "The class 'ring-(--color-brand-200)' can be written as 'ring-brand-200'"
+    },
+    {
+      "filePath": "input.vue",
+      "line": 3,
+      "column": 44,
+      "message": "The class 'divide-(--color-ink-300)' can be written as 'divide-ink-300'"
+    },
+    {
+      "filePath": "input.vue",
+      "line": 5,
+      "column": 20,
+      "message": "Classnames 'px-2, py-2' could be replaced by the 'p-2' shorthand!"
+    },
+    {
+      "filePath": "input.vue",
+      "line": 5,
+      "column": 20,
+      "message": "The class 'rounded-[var(--radius-sm)]' can be written as 'rounded-sm'"
+    },
+    {
+      "filePath": "input.vue",
+      "line": 9,
+      "column": 22,
+      "message": "The class 'bg-[var(--color-doesnotexist)]' can be written as 'bg-(--color-doesnotexist)'"
+    }
+  ]
+}

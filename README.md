@@ -222,9 +222,24 @@ JSON output is stable for CI and tooling:
 
 Always review autofix diffs before committing.
 
-### `--suggest-named-theme-vars` (opt-in)
+### `--suggest-named-theme-vars` (opt-in, audit) / `--theme-css` (auto-engaged at fix)
 
-When a Tailwind v4 `@theme` block defines a forwarder such as:
+NormWind can rewrite class tokens that reference a Tailwind v4 `@theme` variable in their long form (`border-(--color-ink-400)`, `border-[var(--color-ink-400)]/40`, `rounded-[var(--radius-sm)]`) to the equivalent named-utility form (`border-ink-400`, `border-ink-400/40`, `rounded-sm`).
+
+Two `@theme` patterns are supported:
+
+**Direct pattern** — the project authors the theme key itself:
+
+```css
+@theme {
+  --color-ink-400: var(--color-zinc-400);
+  --radius-sm: 0.125rem;
+}
+```
+
+`border-(--color-ink-400)/40` → `border-ink-400/40`, `rounded-[var(--radius-sm)]` → `rounded-sm`.
+
+**Forwarder pattern** — the project forwards a Tailwind-namespaced theme var to a foreign root variable:
 
 ```css
 @theme {
@@ -232,18 +247,11 @@ When a Tailwind v4 `@theme` block defines a forwarder such as:
 }
 ```
 
-Tailwind exposes both forms at runtime:
+`border-(--md-sys-color-outline-variant)` → `border-outline-variant`.
 
-- the long form: `border-(--md-sys-color-outline-variant)`
-- the named form: `border-outline-variant`
+Both rewrites are gated by a per-token CSS rule-body equivalence check: NormWind asks Tailwind to compile both candidates and only emits the rewrite when the produced rule bodies are byte-equivalent (after substituting the forwarder, where applicable). Ambiguous forwarders, unknown variables, and prefix-mismatches (e.g. `rounded-(--color-ink-400)` — `rounded-` is not a color utility) are silently skipped.
 
-Both compile to runtime-equivalent CSS, but the named form is shorter and stays in sync with the design system. NormWind can suggest the named form instead of the raw CSS-variable form — but only when:
-
-1. you pass `--suggest-named-theme-vars` (off by default), and
-2. you pass `--theme-css <path>` pointing to the project's Tailwind entry CSS that contains the `@theme` block, and
-3. the produced CSS rule body for both candidates is byte-equivalent after substituting the forwarder. Ambiguous forwarders (multiple named tokens forwarding to the same source variable) are skipped.
-
-Example:
+**Audit (opt-in via flag):**
 
 ```bash
 npx @lunawerx/normwind \
@@ -252,16 +260,15 @@ npx @lunawerx/normwind \
   --json
 ```
 
-Combine with `--fixall` to rewrite in place:
+**Fix (auto-engaged when `--theme-css` is provided):**
 
 ```bash
 npx @lunawerx/normwind \
   --fixall \
-  --suggest-named-theme-vars \
   --theme-css src/assets/css/theme.css
 ```
 
-When the flag is omitted, NormWind never suggests or rewrites these tokens. There is zero behavioural change for existing pipelines.
+The audit suggestion flag is intentionally still opt-in to preserve the existing public audit contract. During `--fix`/`--fixall` the safety gate is the per-token equivalence check, so passing `--theme-css` alone is sufficient. When neither `--theme-css` nor `--suggest-named-theme-vars` is passed, NormWind produces identical output to v3.0.0; existing CI pipelines are unaffected.
 
 ## CI examples
 
@@ -348,6 +355,16 @@ npm run canonical:check
 NormWind intentionally uses `eslint-plugin-tailwindcss`'s static group data instead of invoking the plugin's `enforces-shorthand` rule directly. Under Tailwind v4, the plugin's config path can return only `separator` and `prefix`, which prevents the rule from resolving many utility families. NormWind keeps the useful upstream group data while using its own Tailwind v4-compatible matcher and Tailwind's own v4 canonicalization engine.
 
 ## Changelog
+
+### v3.3.0 — 2026-05-08
+
+- **Direct-theme-key resolver** — `--suggest-named-theme-vars` now collapses utilities that reference a registered `@theme` variable directly (e.g. `border-(--color-ink-400)/40`, `text-(--color-ink-700)`, `rounded-[var(--radius-sm)]`) to the named form (`border-ink-400/40`, `text-ink-700`, `rounded-sm`). Previously the resolver only handled the forwarder pattern (`--color-x: var(--md-sys-color-x)` authored with `--md-sys-color-x`); it now also handles the direct pattern where the project authors the theme key itself. The CSS rule-body equivalence check still gates every emitted suggestion, so safety is unchanged.
+- **Modifier-aware** — opacity-style modifiers such as `/40` and `!` important markers now flow through the named-theme-var resolver: `border-(--color-ink-400)/40` round-trips to `border-ink-400/40` instead of being silently skipped.
+- **Bracket-form audit coverage** — the audit's arbitrary-token regex now matches an optional trailing `/<modifier>` suffix, so tokens like `border-[var(--color-ink-400)]/40` reach the canonicalizer instead of being dropped on the floor. The audit also chains Tailwind's canonicalizer into the named-theme resolver, so a single finding emits the most specific safe rewrite (e.g. `border-[var(--color-ink-400)]/40` → `border-ink-400/40` in one message).
+- **Theme CSS auto-engages the resolver during fix** — `--fix`/`--fixall` now apply named-theme-var rewrites whenever `--theme-css` is provided; the explicit `--suggest-named-theme-vars` flag is no longer required at fix time. The per-token CSS equivalence check is the safety gate. Audit-time still requires the explicit flag (preserves the existing public contract).
+- **Order-agnostic `w`/`h` → `size` shorthand** — height-first authoring (`h-5 w-5`, `hover:h-8 hover:w-8`) now collapses to `size-5`, `hover:size-8` alongside the width-first form. Previously `mergeFixWidthHeight` only matched width-first pairs.
+- **Multi-line class strings with `data-[state=...]:` variants are no longer skipped** — the operator-character heuristic that classifies a class string as "fixable" used to reject anything containing `=`, `>`, `<`, etc. That filter now ignores characters that appear inside Tailwind's `[…]` and `(…)` brackets, so attribute-style variants such as `data-[state=open]:text-(--color-ink-1000)` and `aria-[expanded=true]:rotate-180` no longer suppress fixes on their host class string.
+- **New regression fixtures** — `reverse-size-shorthand` (height-first `w`/`h`), `multiline-with-data-attr` (variant brackets in multi-line class strings), and `named-theme-var-direct` (the seven direct-theme-key example tokens plus a negative case for an unknown var). The regression harness now auto-supplies `--theme-css` and `--suggest-named-theme-vars` for any fixture that ships a sibling `theme.css`, and the prepush gate counts fixtures dynamically instead of asserting a magic number.
 
 ### v3.2.0 — 2026-05-08
 

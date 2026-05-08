@@ -109,16 +109,36 @@ addCheck("canonical drift check", async () => {
     assert(result.ok, `canonical:check failed\n${result.stdout}\n${result.stderr}`);
 });
 
+// Compute the actual fixture count once so the assertions match the on-disk
+// state. Hard-coding the count would force every fixture addition to chase a
+// magic number here; what we actually want is "every fixture is clean and the
+// suite still runs all of them".
+async function countFixtures() {
+    const fixturesDir = path.join(REPO_ROOT, "test", "fixtures");
+    const entries = await fs.readdir(fixturesDir, { withFileTypes: true });
+    return entries.filter((e) => e.isDirectory()).length;
+}
+
 addCheck("regression fixtures", async () => {
     const result = await run(NODE_BIN, [REGRESSION_SCRIPT]);
     assert(result.ok, `test:regression failed\n${result.stdout}\n${result.stderr}`);
-    assert(result.stdout.includes("7 fixtures, 0 failures."), "regression summary did not report 7 clean fixtures");
+    const expected = await countFixtures();
+    assert(expected > 0, "no fixtures found under test/fixtures");
+    assert(
+        result.stdout.includes(`${expected} fixtures, 0 failures.`),
+        `regression summary did not report ${expected} clean fixtures\n${result.stdout}`,
+    );
 });
 
 addCheck("snapshot/live parity", async () => {
     const result = await run(NODE_BIN, [COMPARE_SCRIPT]);
     assert(result.ok, `test:compare failed\n${result.stdout}\n${result.stderr}`);
-    assert(result.stdout.includes("7 fixtures, 0 failures."), "compare summary did not report 7 clean fixtures");
+    const expected = await countFixtures();
+    assert(expected > 0, "no fixtures found under test/fixtures");
+    assert(
+        result.stdout.includes(`${expected} fixtures, 0 failures.`),
+        `compare summary did not report ${expected} clean fixtures\n${result.stdout}`,
+    );
 });
 
 addCheck("CLI smoke audit/fix", async () => {
