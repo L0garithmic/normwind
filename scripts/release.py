@@ -179,10 +179,20 @@ def npm_publish(npm_token: str) -> None:
         tmp_npmrc = f.name
 
     try:
-        run(
-            ["npm", "publish", f"--registry={NPM_REGISTRY}", "--access", "public",
-             f"--userconfig={tmp_npmrc}"],
-        )
+        # On Windows, `npm` is a .cmd shim and Python's subprocess can't
+        # resolve it without going through the shell. Route through cmd.exe
+        # explicitly so the call works regardless of how Python was invoked.
+        npm_args = [
+            "publish",
+            f"--registry={NPM_REGISTRY}",
+            "--access", "public",
+            f"--userconfig={tmp_npmrc}",
+        ]
+        if sys.platform == "win32":
+            comspec = os.environ.get("ComSpec", "cmd.exe")
+            run([comspec, "/d", "/s", "/c", "npm", *npm_args])
+        else:
+            run(["npm", *npm_args])
     finally:
         os.unlink(tmp_npmrc)
 
