@@ -21,3 +21,6 @@ node_modules/
 
 # regression-harness scratch output (only emitted when a fixture diverges)
 test/fixtures/**/actual.*
+
+# editor / refactor backups
+*.bak

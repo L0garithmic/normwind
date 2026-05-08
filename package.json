@@ -17,7 +17,7 @@
     "normwinds": "bin/normwind.mjs"
   },
   "files": [
-    "bin",
+    "bin/normwind.mjs",
     "docs/reference/canonical-replacements.json",
     "docs/reference/canonical-replacements.md",
     "README.md"

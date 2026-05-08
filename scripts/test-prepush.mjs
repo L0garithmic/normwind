@@ -81,7 +81,8 @@ addCheck("package metadata", async () => {
     assert(pkg.dependencies?.tailwindcss, "tailwindcss dependency is missing");
     assert(pkg.dependencies?.["eslint-plugin-tailwindcss"], "eslint-plugin-tailwindcss dependency is missing");
     assert(!pkg.dependencies?.eslint, "eslint must not be a runtime dependency");
-    assert(pkg.files.includes("bin"), "published files must include bin");
+    assert(pkg.files.includes("bin/normwind.mjs"), "published files must include bin/normwind.mjs explicitly");
+    assert(!pkg.files.includes("bin"), "published files must whitelist bin/normwind.mjs explicitly, not the entire bin/ directory (otherwise *.bak and other scratch files leak into the tarball)");
     assert(pkg.files.includes("docs/reference/canonical-replacements.json"), "published files must include canonical JSON snapshot");
     assert(pkg.files.includes("docs/reference/canonical-replacements.md"), "published files must include canonical MD snapshot");
     assert(pkg.scripts?.["canonical:check"], "canonical:check script is missing");
@@ -158,6 +159,8 @@ addCheck("npm pack dry-run", async () => {
     assert(files.has("README.md"), "pack is missing README.md");
     assert(!files.has("scripts/test-regression.mjs"), "pack should not include test scripts");
     assert(!files.has("test/fixtures/family-shorthand/input.tsx"), "pack should not include test fixtures");
+    const stragglers = [...files].filter((f) => /\.(bak|orig|swp|tmp)$/i.test(f));
+    assert(stragglers.length === 0, `pack must not contain editor/refactor backups: ${stragglers.join(", ")}`);
 });
 
 async function main() {

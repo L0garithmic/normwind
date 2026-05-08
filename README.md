@@ -349,6 +349,14 @@ NormWind intentionally uses `eslint-plugin-tailwindcss`'s static group data inst
 
 ## Changelog
 
+### v3.2.0 — 2026-05-08
+
+- **Vue dynamic bindings** — the class-attribute extractor now matches `:class="..."` and `v-bind:class="..."` in addition to plain `class="..."`, so utilities embedded in Vue ternaries and object/array bindings are audited and fixed alongside their static siblings
+- **Multi-line class attributes** — the extractor regex no longer terminates at the first newline, so class lists wrapped across multiple lines (common in templates and JSX) are now picked up in full
+- **Internal refactor** — class-string extraction has been split into focused helpers (`shouldExtractQuotedClassValue`, `extractNestedQuotedClassStrings`) for readability and to make future extractor changes easier to reason about; no behavior change beyond the two items above
+- **Packaging hygiene** — the `package.json` `files` whitelist now lists `bin/normwind.mjs` explicitly instead of the entire `bin/` directory, and the prepush gate fails the publish if any `*.bak`, `*.orig`, `*.swp`, or `*.tmp` straggler ends up in the tarball
+- **Single source of truth** — the parent/`repo-clone` wrapper layout has been collapsed into a single flat repo; `bin/normwind.mjs` is the only CLI source, and `scripts/release.py` no longer copies files at release time
+
 ### v3.1.1
 
 - **`--suggest-named-theme-vars` flag (opt-in)** — detects classes of the form `utility-(--var-name)` and, when the project's `@theme` defines a single-step forwarder for that variable, suggests (or rewrites with `--fixall`) the equivalent named-theme class such as `utility-name`
