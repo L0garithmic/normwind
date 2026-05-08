@@ -1800,63 +1800,9 @@ function indexToLineCol(lineStarts, index) {
 
 const QUOTE_VALUE_SHAPE = /\b(?:[a-z]+:)*!?-?[a-z][a-z0-9-]*(?:-[^\s]+)*!?\b/i;
 
-function shouldExtractQuotedClassValue(value, { allowSingleTokenCanonical = false } = {}) {
-    const singleToken = !value.includes(" ");
-    if (
-        singleToken &&
-        !(
-            (allowSingleTokenCanonical && (
-                value.includes("[") ||
-                value.includes("(--") ||
-                getKnownCanonicalClass(value)
-            )) ||
-            value.startsWith("!") ||
-            value.includes(":!")
-        )
-    ) {
-        return false;
-    }
-
-    if (!value.includes("-") && !value.includes("!")) {
-        return false;
-    }
-
-    if (value.includes("*")) {
-        return false;
-    }
-
-    if (/[=><&|?]/.test(value)) {
-        return false;
-    }
-
-    return QUOTE_VALUE_SHAPE.test(value);
-}
-
-function extractNestedQuotedClassStrings(value, baseIndex, options) {
-    const results = [];
-    const quoteRegexes = [/'((?:\\.|[^'\\])*)'/g, /`((?:\\.|[^`\\])*)`/g];
-
-    for (const quoteRegex of quoteRegexes) {
-        let match;
-        while ((match = quoteRegex.exec(value)) !== null) {
-            const quotedValue = match[1];
-            if (!shouldExtractQuotedClassValue(quotedValue, options)) {
-                continue;
-            }
-
-            results.push({
-                value: quotedValue,
-                index: baseIndex + match.index + 1,
-            });
-        }
-    }
-
-    return results;
-}
-
 function extractClassLikeStrings(sourceText, { allowSingleTokenCanonical = false } = {}) {
     const results = [];
-    const classAttrRegex = /(?:\bclass|(?::|\bv-bind:)class)\s*=\s*(["'])([\s\S]*?)\1/g;
+    const classAttrRegex = /\bclass\s*=\s*(["'])([^"']+)\1/g;
     let match;
 
     while ((match = classAttrRegex.exec(sourceText)) !== null) {
@@ -1865,17 +1811,41 @@ function extractClassLikeStrings(sourceText, { allowSingleTokenCanonical = false
             value: match[2],
             index: startIndex,
         });
-
-        results.push(
-            ...extractNestedQuotedClassStrings(match[2], startIndex, { allowSingleTokenCanonical }),
-        );
     }
 
     const quoteRegexes = [/"((?:\\.|[^"\\])*)"/g, /'((?:\\.|[^'\\])*)'/g, /`((?:\\.|[^`\\])*)`/g];
     for (const quoteRegex of quoteRegexes) {
         while ((match = quoteRegex.exec(sourceText)) !== null) {
             const value = match[1];
-            if (!shouldExtractQuotedClassValue(value, { allowSingleTokenCanonical })) {
+            const singleToken = !value.includes(" ");
+            if (
+                singleToken &&
+                !(
+                    (allowSingleTokenCanonical && (
+                        value.includes("[") ||
+                        value.includes("(--") ||
+                        getKnownCanonicalClass(value)
+                    )) ||
+                    value.startsWith("!") ||
+                    value.includes(":!")
+                )
+            ) {
+                continue;
+            }
+
+            if (!value.includes("-") && !value.includes("!")) {
+                continue;
+            }
+
+            if (value.includes("*")) {
+                continue;
+            }
+
+            if (/[=><&|?]/.test(value)) {
+                continue;
+            }
+
+            if (!QUOTE_VALUE_SHAPE.test(value)) {
                 continue;
             }
 
