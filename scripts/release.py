@@ -211,6 +211,11 @@ def main() -> None:
         default=None,
         help="GitHub release body text (default: auto-generated)",
     )
+    parser.add_argument(
+        "--release-notes-file",
+        default=None,
+        help="Path to a Markdown file to use as the GitHub release body. Wins over --release-notes.",
+    )
     args = parser.parse_args()
 
     new_version = args.version.lstrip("v")
@@ -231,9 +236,15 @@ def main() -> None:
 
     commit_message = args.message or (f"release: publish {new_version}")
 
-    release_notes = args.release_notes or (
-        f"## What's new in {new_version}\n\nSee commit history for full details."
-    )
+    if args.release_notes_file:
+        notes_path = Path(args.release_notes_file).resolve()
+        if not notes_path.exists():
+            sys.exit(f"--release-notes-file does not exist: {notes_path}")
+        release_notes = notes_path.read_text(encoding="utf-8")
+    elif args.release_notes:
+        release_notes = args.release_notes
+    else:
+        release_notes = f"## What's new in {new_version}\n\nSee commit history for full details."
 
     print(f"\nReleasing @lunawerx/normwind v{new_version}\n")
 
