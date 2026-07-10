@@ -1,0 +1,15 @@
+# Normalize line endings. The generated canonical artifacts are byte-compared
+# by --check-canonical, so they must check out identically on every platform —
+# Windows' default autocrlf would hand them to the drift check with CRLF and
+# fail every fresh clone.
+* text=auto
+docs/reference/canonical-replacements.json text eol=lf
+docs/reference/canonical-replacements.md text eol=lf
+
+# The regression suite (scripts/test-regression.mjs) does a plain string
+# comparison of fixture input/output against the committed expected.* files.
+# On machines with core.autocrlf=true, a fresh checkout would materialize
+# input.* with CRLF while expected.fixed.*/expected.fixall.* stay LF (or vice
+# versa), failing the byte comparison for reasons unrelated to the code under
+# test. Pin every fixture file to LF regardless of local autocrlf settings.
+test/fixtures/** text eol=lf

@@ -1,0 +1,6 @@
+{
+  "ruleId": "tailwindcss/enforces-shorthand",
+  "lintedFiles": 1,
+  "findingCount": 0,
+  "findings": []
+}

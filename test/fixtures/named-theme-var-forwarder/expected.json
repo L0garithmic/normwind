@@ -1,0 +1,13 @@
+{
+  "ruleId": "tailwindcss/enforces-shorthand",
+  "lintedFiles": 1,
+  "findingCount": 1,
+  "findings": [
+    {
+      "filePath": "input.vue",
+      "line": 2,
+      "column": 17,
+      "message": "The class 'border-(--md-sys-color-outline-variant)' can be written as 'border-outline-variant'"
+    }
+  ]
+}

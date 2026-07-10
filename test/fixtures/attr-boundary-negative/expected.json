@@ -1,0 +1,13 @@
+{
+  "ruleId": "tailwindcss/enforces-shorthand",
+  "lintedFiles": 1,
+  "findingCount": 1,
+  "findings": [
+    {
+      "filePath": "input.vue",
+      "line": 2,
+      "column": 105,
+      "message": "Classnames 'w-6, h-6' could be replaced by the 'size-6' shorthand!"
+    }
+  ]
+}

@@ -1,0 +1,67 @@
+{
+  "ruleId": "tailwindcss/enforces-shorthand",
+  "lintedFiles": 1,
+  "findingCount": 10,
+  "findings": [
+    {
+      "filePath": "input.tsx",
+      "line": 17,
+      "column": 21,
+      "message": "Classnames 'rounded-tl-lg, rounded-tr-lg' could be replaced by the 'rounded-t-lg' shorthand!"
+    },
+    {
+      "filePath": "input.tsx",
+      "line": 21,
+      "column": 21,
+      "message": "Classnames 'rounded-bl-md, rounded-br-md' could be replaced by the 'rounded-b-md' shorthand!"
+    },
+    {
+      "filePath": "input.tsx",
+      "line": 21,
+      "column": 21,
+      "message": "Classnames 'rounded-tl-md, rounded-bl-md' could be replaced by the 'rounded-l-md' shorthand!"
+    },
+    {
+      "filePath": "input.tsx",
+      "line": 21,
+      "column": 21,
+      "message": "Classnames 'rounded-tl-md, rounded-tr-md' could be replaced by the 'rounded-t-md' shorthand!"
+    },
+    {
+      "filePath": "input.tsx",
+      "line": 21,
+      "column": 21,
+      "message": "Classnames 'rounded-tr-md, rounded-br-md' could be replaced by the 'rounded-r-md' shorthand!"
+    },
+    {
+      "filePath": "input.tsx",
+      "line": 25,
+      "column": 21,
+      "message": "Classnames 'rounded-t-xl, rounded-r-xl, rounded-b-xl, rounded-l-xl' could be replaced by the 'rounded-xl' shorthand!"
+    },
+    {
+      "filePath": "input.tsx",
+      "line": 29,
+      "column": 21,
+      "message": "Classnames 'border-l, border-r' could be replaced by the 'border-x' shorthand!"
+    },
+    {
+      "filePath": "input.tsx",
+      "line": 29,
+      "column": 21,
+      "message": "Classnames 'border-t, border-b' could be replaced by the 'border-y' shorthand!"
+    },
+    {
+      "filePath": "input.tsx",
+      "line": 29,
+      "column": 21,
+      "message": "Classnames 'border-t, border-r, border-b, border-l' could be replaced by the 'border' shorthand!"
+    },
+    {
+      "filePath": "input.tsx",
+      "line": 33,
+      "column": 21,
+      "message": "Classnames 'hover:rounded-tl-lg, hover:rounded-tr-lg' could be replaced by the 'hover:rounded-t-lg' shorthand!"
+    }
+  ]
+}

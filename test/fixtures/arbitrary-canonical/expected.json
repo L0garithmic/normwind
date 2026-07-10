@@ -1,0 +1,37 @@
+{
+  "ruleId": "tailwindcss/enforces-shorthand",
+  "lintedFiles": 1,
+  "findingCount": 5,
+  "findings": [
+    {
+      "filePath": "input.vue",
+      "line": 3,
+      "column": 17,
+      "message": "The class 'rounded-[24px]' can be written as 'rounded-3xl'"
+    },
+    {
+      "filePath": "input.vue",
+      "line": 3,
+      "column": 32,
+      "message": "The class 'w-[100%]' can be written as 'w-full'"
+    },
+    {
+      "filePath": "input.vue",
+      "line": 3,
+      "column": 41,
+      "message": "The class 'h-[1.5rem]' can be written as 'h-6'"
+    },
+    {
+      "filePath": "input.vue",
+      "line": 4,
+      "column": 17,
+      "message": "The class 'p-[1rem]' can be written as 'p-4'"
+    },
+    {
+      "filePath": "input.vue",
+      "line": 4,
+      "column": 26,
+      "message": "The class 'm-[8px]' can be written as 'm-2'"
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "ruleId": "tailwindcss/enforces-shorthand",
+  "lintedFiles": 1,
+  "findingCount": 3,
+  "findings": [
+    {
+      "filePath": "input.tsx",
+      "line": 7,
+      "column": 21,
+      "message": "Classnames 'md:px-4, md:py-4' could be replaced by the 'md:p-4' shorthand!"
+    },
+    {
+      "filePath": "input.tsx",
+      "line": 11,
+      "column": 21,
+      "message": "Classnames 'hover:w-8, hover:h-8' could be replaced by the 'hover:size-8' shorthand!"
+    },
+    {
+      "filePath": "input.tsx",
+      "line": 15,
+      "column": 21,
+      "message": "Classnames 'dark:mt-2, dark:mb-2' could be replaced by the 'dark:my-2' shorthand!"
+    }
+  ]
+}

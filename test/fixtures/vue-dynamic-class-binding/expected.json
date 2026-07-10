@@ -1,0 +1,37 @@
+{
+  "ruleId": "tailwindcss/enforces-shorthand",
+  "lintedFiles": 1,
+  "findingCount": 5,
+  "findings": [
+    {
+      "filePath": "input.vue",
+      "line": 2,
+      "column": 26,
+      "message": "Classnames 'px-4, py-4' could be replaced by the 'p-4' shorthand!"
+    },
+    {
+      "filePath": "input.vue",
+      "line": 2,
+      "column": 48,
+      "message": "Classnames 'pl-2, pr-2' could be replaced by the 'px-2' shorthand!"
+    },
+    {
+      "filePath": "input.vue",
+      "line": 3,
+      "column": 22,
+      "message": "Classnames 'w-4, h-4' could be replaced by the 'size-4' shorthand!"
+    },
+    {
+      "filePath": "input.vue",
+      "line": 4,
+      "column": 30,
+      "message": "Classnames 'mt-2, mb-2' could be replaced by the 'my-2' shorthand!"
+    },
+    {
+      "filePath": "input.vue",
+      "line": 4,
+      "column": 44,
+      "message": "Classnames 'gap-x-2, gap-y-2' could be replaced by the 'gap-2' shorthand!"
+    }
+  ]
+}

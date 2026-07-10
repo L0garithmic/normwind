@@ -1,0 +1,19 @@
+{
+  "ruleId": "tailwindcss/enforces-shorthand",
+  "lintedFiles": 1,
+  "findingCount": 2,
+  "findings": [
+    {
+      "filePath": "input.tsx",
+      "line": 15,
+      "column": 21,
+      "message": "Classnames 'data-[state=open]:px-4, data-[state=open]:py-4' could be replaced by the 'data-[state=open]:p-4' shorthand!"
+    },
+    {
+      "filePath": "input.tsx",
+      "line": 19,
+      "column": 21,
+      "message": "Classnames '[&>svg]:w-4, [&>svg]:h-4' could be replaced by the '[&>svg]:size-4' shorthand!"
+    }
+  ]
+}
