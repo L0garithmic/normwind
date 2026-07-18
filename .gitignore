@@ -24,3 +24,6 @@ test/fixtures/**/actual.*
 
 # editor / refactor backups
 *.bak
+
+# Generated agent code map (local artifact; rebuild with ~/.claude/tools/codemap.py)
+.claude/codemap/

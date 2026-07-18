@@ -50,7 +50,7 @@ ROOT = Path(__file__).resolve().parent.parent  # repo root
 PACKAGE_JSON = ROOT / "package.json"
 ENV_FILE = ROOT / ".env"
 
-GITHUB_REPO = "LunarWerxs/normwind"
+GITHUB_REPO = "LunarWerxs/NormWind"
 NPM_REGISTRY = "https://registry.npmjs.org/"
 
 

@@ -1,7 +1,7 @@
 <div align="center">
 
-<a href="https://github.com/LunarWerxs/normwind">
-  <img src="https://raw.githubusercontent.com/LunarWerxs/normwind/main/assets/normwind-share-card.png" alt="NormWind — Normalize Tailwinds" width="880">
+<a href="https://github.com/LunarWerxs/NormWind">
+  <img src="https://raw.githubusercontent.com/LunarWerxs/NormWind/main/assets/normwind-share-card.png" alt="NormWind — Normalize Tailwinds" width="880">
 </a>
 
 <br/>
@@ -505,11 +505,11 @@ Initial public release. Shorthand auditor and autofixer for Tailwind CSS utility
 
 ## 📄 License
 
-[MIT](LICENSE) © [LunaWerx](https://github.com/LunarWerxs)
+[MIT](LICENSE) © [LunarWerx](https://github.com/LunarWerxs)
 
 <div align="center">
 <br/>
-<img src="https://raw.githubusercontent.com/LunarWerxs/normwind/main/assets/normwind-icon.png" alt="" width="52">
+<img src="https://raw.githubusercontent.com/LunarWerxs/NormWind/main/assets/normwind-icon.png" alt="" width="52">
 <br/>
 <sub><strong>NormWind</strong> — keep your Tailwind classes calm.</sub>
 </div>

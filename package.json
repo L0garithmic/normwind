@@ -6,11 +6,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/LunarWerxs/normwind.git"
+    "url": "git+https://github.com/LunarWerxs/NormWind.git"
   },
-  "homepage": "https://github.com/LunarWerxs/normwind",
+  "homepage": "https://github.com/LunarWerxs/NormWind",
   "bugs": {
-    "url": "https://github.com/LunarWerxs/normwind/issues"
+    "url": "https://github.com/LunarWerxs/NormWind/issues"
   },
   "bin": {
     "normwind": "bin/normwind.mjs",
