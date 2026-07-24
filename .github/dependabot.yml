@@ -5,9 +5,26 @@ updates:
     schedule:
       interval: weekly
     groups:
-      runtime-dependencies:
+      routine-runtime-updates:
+        applies-to: version-updates
         patterns:
           - "*"
+        exclude-patterns:
+          # Tailwind changes the canonical snapshot and always needs its own
+          # compatibility/regeneration pass.
+          - tailwindcss
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # Babel 8 requires Node >=22.18; NormWind still supports Node 20.
+      - dependency-name: "@babel/parser"
+        update-types:
+          - version-update:semver-major
+      # v4 removed the internal group-data export NormWind currently uses.
+      - dependency-name: eslint-plugin-tailwindcss
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: github-actions
     directory: /

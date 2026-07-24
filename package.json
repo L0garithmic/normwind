@@ -54,7 +54,7 @@
   "dependencies": {
     "@babel/parser": "7.29.7",
     "eslint-plugin-tailwindcss": "3.18.3",
-    "tailwindcss": "4.2.4"
+    "tailwindcss": "4.3.3"
   },
   "publishConfig": {
     "access": "public"

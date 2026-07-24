@@ -3,9 +3,9 @@
 This file is generated from Tailwind's canonicalization engine.
 
 - Source engine: `tailwindcss.designSystem.canonicalizeCandidates`
-- Tailwind version: `4.2.4`
-- Class list scanned: `22685`
-- Canonical replacements extracted: `12069`
+- Tailwind version: `4.3.3`
+- Class list scanned: `23286`
+- Canonical replacements extracted: `12438`
 
 ## Drift Prevention
 

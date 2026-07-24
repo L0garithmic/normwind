@@ -1,7 +1,7 @@
 {
   "ruleId": "tailwindcss/enforces-shorthand",
   "lintedFiles": 1,
-  "findingCount": 6,
+  "findingCount": 7,
   "findings": [
     {
       "filePath": "input.vue",
@@ -38,6 +38,12 @@
       "line": 4,
       "column": 34,
       "message": "The class 'bg-[oklch(96.2%_0.059_95.617)]' can be written as 'bg-amber-100'"
+    },
+    {
+      "filePath": "input.vue",
+      "line": 4,
+      "column": 65,
+      "message": "The class 'bg-[#FFF]' can be written as 'bg-white'"
     }
   ]
 }
