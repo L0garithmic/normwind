@@ -109,6 +109,14 @@ addCheck("workflow and release hardening", async () => {
     assert(!releaseScript.includes("remote set-url"), "release script must not persist a PAT in the origin URL");
     assert(!releaseScript.includes('"--tags"'), "release script must not push unrelated local tags");
     assert(releaseScript.includes('"--atomic"'), "release script should push main and the release tag atomically");
+    assert(
+        !releaseScript.includes("See commit history for full details."),
+        "release script must never publish placeholder release notes",
+    );
+    assert(
+        releaseScript.includes("release_notes_from_readme(new_version)"),
+        "default release notes must come from the matching detailed README changelog",
+    );
 });
 
 addCheck("canonical snapshot integrity", async () => {

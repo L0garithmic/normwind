@@ -32,6 +32,7 @@ Single source of truth:
 
 import argparse
 import base64
+import html
 import json
 import os
 import re
@@ -49,6 +50,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent  # repo root
 PACKAGE_JSON = ROOT / "package.json"
+README_FILE = ROOT / "README.md"
 ENV_FILE = ROOT / ".env"
 
 GITHUB_REPO = "LunarWerxs/NormWind"
@@ -72,6 +74,69 @@ def load_env(path: Path) -> dict[str, str]:
         key, _, value = line.partition("=")
         env[key.strip()] = value.strip()
     return env
+
+
+def release_notes_from_readme(new_version: str) -> str:
+    """Build release notes from the matching detailed README changelog entry.
+
+    A release without an authored changelog is a release-preparation error,
+    not a reason to publish placeholder text. Explicit --release-notes and
+    --release-notes-file values can still override this default.
+    """
+    readme = README_FILE.read_text(encoding="utf-8")
+    version = re.escape(new_version)
+    pattern = re.compile(
+        rf"<details>\s*"
+        rf"<summary><strong>v{version}</strong>(?P<summary>.*?)</summary>\s*"
+        rf"(?:<br\s*/?>\s*)?"
+        rf"(?P<body>.*?)\s*</details>",
+        re.DOTALL,
+    )
+    match = pattern.search(readme)
+    if not match:
+        sys.exit(
+            f"README.md has no detailed v{new_version} changelog entry. "
+            "Author it before releasing, or pass --release-notes / "
+            "--release-notes-file explicitly."
+        )
+
+    body = match.group("body").strip()
+    if not body or not re.search(r"(?m)^-\s+\S", body):
+        sys.exit(
+            f"README.md's v{new_version} changelog entry has no bullet details. "
+            "Author the actual changes before releasing."
+        )
+
+    summary_html = match.group("summary").strip()
+    summary_text = html.unescape(re.sub(r"<[^>]+>", "", summary_html)).strip()
+    summary_text = summary_text.removeprefix("—").strip()
+    intro = f"## NormWind v{new_version}"
+    if summary_text:
+        intro += f"\n\n_{summary_text}_"
+
+    tags = subprocess.run(
+        ["git", "tag", "--sort=-version:refname"],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+    )
+    previous_tag = next(
+        (
+            tag.strip()
+            for tag in tags.stdout.splitlines()
+            if tag.strip() and tag.strip() != f"v{new_version}"
+        ),
+        None,
+    )
+    comparison = ""
+    if previous_tag:
+        comparison = (
+            f"\n\n**Full comparison:** "
+            f"[{previous_tag}...v{new_version}]"
+            f"(https://github.com/{GITHUB_REPO}/compare/{previous_tag}...v{new_version})"
+        )
+
+    return f"{intro}\n\n{body}{comparison}"
 
 
 def run(cmd: list[str], cwd: Path | None = None, env_extra: dict | None = None, display: str | None = None) -> str:
@@ -480,7 +545,7 @@ def main() -> None:
     parser.add_argument(
         "--release-notes",
         default=None,
-        help="GitHub release body text (default: auto-generated)",
+        help="GitHub release body text (default: matching detailed README changelog)",
     )
     parser.add_argument(
         "--release-notes-file",
@@ -542,7 +607,7 @@ def main() -> None:
     elif args.release_notes:
         release_notes = args.release_notes
     else:
-        release_notes = f"## What's new in {new_version}\n\nSee commit history for full details."
+        release_notes = release_notes_from_readme(new_version)
 
     print(f"\nReleasing @lunawerx/normwind v{new_version}\n")
 
