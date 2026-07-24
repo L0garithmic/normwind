@@ -11,11 +11,11 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const PACKAGE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const require = createRequire(import.meta.url);
+const bundledRequire = createRequire(import.meta.url);
 
 // Single source of truth: npm always includes package.json in the published
 // tarball, so the version is read from it rather than duplicated here.
-const NORMWINDS_VERSION = require("../package.json").version;
+const NORMWINDS_VERSION = bundledRequire("../package.json").version;
 const RULE_ID = "tailwindcss/enforces-shorthand";
 const DEFAULT_PATTERNS = ["**/*.{vue,js,mjs,ts,jsx,tsx}"];
 const ROOT_FONT_SIZE_PX = 16;
@@ -79,12 +79,46 @@ const CACHE_SCHEMA_VERSION = 1;
 const MAX_CACHE_FILE_BYTES = 8 * 1024 * 1024;
 
 let tailwindModuleCache = null;
+
+function resolveTailwindRuntime() {
+    // Canonicalization must follow the target project's Tailwind semantics.
+    // NormWind bundles Tailwind as a zero-config fallback, but using that newer
+    // engine against a project pinned to an older v4 release can suggest a
+    // named utility whose theme value or availability changed between minors.
+    // Resolve from cwd first so local installs, npx runs, and monorepo package
+    // directories all use the Tailwind version that will actually build the
+    // scanned source.
+    try {
+        const projectRequire = createRequire(path.resolve(process.cwd(), "package.json"));
+        const projectPkg = projectRequire("tailwindcss/package.json");
+        const major = Number.parseInt(String(projectPkg?.version ?? "").split(".")[0], 10);
+        if (major === 4) {
+            return {
+                tailwind: projectRequire("tailwindcss"),
+                tailwindPkg: projectPkg,
+                tailwindRequire: projectRequire,
+                source: "project",
+            };
+        }
+    } catch {
+        // A project-local Tailwind install is optional. The bundled engine
+        // preserves standalone/global operation and existing zero-config use.
+    }
+
+    return {
+        tailwind: bundledRequire("tailwindcss"),
+        tailwindPkg: bundledRequire("tailwindcss/package.json"),
+        tailwindRequire: bundledRequire,
+        source: "bundled",
+    };
+}
+
 function loadTailwind() {
     if (!tailwindModuleCache) {
+        const runtime = resolveTailwindRuntime();
         tailwindModuleCache = {
-            tailwind: require("tailwindcss"),
-            tailwindPkg: require("tailwindcss/package.json"),
-            tailwindGroups: require("eslint-plugin-tailwindcss/lib/config/groups").groups,
+            ...runtime,
+            tailwindGroups: bundledRequire("eslint-plugin-tailwindcss/lib/config/groups").groups,
         };
     }
     return tailwindModuleCache;
@@ -94,8 +128,8 @@ let designSystemPromise = null;
 async function loadTailwindDesignSystem() {
     if (!designSystemPromise) {
         designSystemPromise = (async () => {
-            const { tailwind } = loadTailwind();
-            const tailwindIndexCssPath = require.resolve("tailwindcss/index.css");
+            const { tailwind, tailwindRequire } = loadTailwind();
+            const tailwindIndexCssPath = tailwindRequire.resolve("tailwindcss/index.css");
             const css = await fs.readFile(tailwindIndexCssPath, "utf8");
             const designSystem = await tailwind.__unstable__loadDesignSystem(css, {
                 from: tailwindIndexCssPath,
@@ -185,8 +219,8 @@ async function loadAugmentedDesignSystem(themeCssPath) {
     let promise = augmentedDesignSystemPromises.get(absPath);
     if (!promise) {
         promise = (async () => {
-            const { tailwind } = loadTailwind();
-            const tailwindIndexCssPath = require.resolve("tailwindcss/index.css");
+            const { tailwind, tailwindRequire } = loadTailwind();
+            const tailwindIndexCssPath = tailwindRequire.resolve("tailwindcss/index.css");
             const baseCss = await fs.readFile(tailwindIndexCssPath, "utf8");
             const { resolvedCss, importedFiles } = await resolveThemeCssEntry(themeCssPath);
 
@@ -390,9 +424,11 @@ async function getCanonicalizeCandidate() {
                 if (cached !== undefined) {
                     return cached;
                 }
-                const canonical = designSystem.canonicalizeCandidates([candidate], {
-                    rem: ROOT_FONT_SIZE_PX,
-                })?.[0];
+                const canonical = typeof designSystem.canonicalizeCandidates === "function"
+                    ? designSystem.canonicalizeCandidates([candidate], {
+                        rem: ROOT_FONT_SIZE_PX,
+                    })?.[0]
+                    : candidate;
                 const result = (!canonical || /\s/.test(canonical)) ? candidate : canonical;
                 CANONICAL_MEMO.set(candidate, result);
                 DYNAMIC_CACHE_KEYS.add(candidate);
@@ -1066,6 +1102,11 @@ function addCanonicalReplacement(replacements, inputClass, canonicalClass, sourc
 async function extractCanonicalReplacements({ writeFiles, checkOnly = false }) {
     const { designSystem, tailwindIndexCssPath } = await loadTailwindDesignSystem();
     const { tailwindPkg } = loadTailwind();
+    if (typeof designSystem.canonicalizeCandidates !== "function") {
+        throw new Error(
+            `normwinds: Tailwind ${tailwindPkg.version} does not expose the canonicalization API required by --extract-canonical/--check-canonical`,
+        );
+    }
 
     const classList = designSystem.getClassList().map(([className]) => className);
     const themeValueMap = new Map();
@@ -2510,7 +2551,7 @@ const RENDER_FUNCTION_NAMES = new Set([
 let babelParserModule = null;
 
 function getBabelParser() {
-    babelParserModule ??= require("@babel/parser");
+    babelParserModule ??= bundledRequire("@babel/parser");
     return babelParserModule;
 }
 

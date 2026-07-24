@@ -201,6 +201,72 @@ addCheck("snapshot/live parity", async () => {
     );
 });
 
+addCheck("project-local Tailwind controls canonicalization", async () => {
+    async function runWithFakeTailwind(version, { exposesCanonicalizer }) {
+        const dir = path.join(
+            os.tmpdir(),
+            `normwind-project-tailwind-${version}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        );
+        const tailwindDir = path.join(dir, "node_modules", "tailwindcss");
+        await fs.mkdir(tailwindDir, { recursive: true });
+        await fs.writeFile(
+            path.join(tailwindDir, "package.json"),
+            `${JSON.stringify({
+                name: "tailwindcss",
+                version,
+                main: "./index.cjs",
+                exports: {
+                    ".": "./index.cjs",
+                    "./package.json": "./package.json",
+                    "./index.css": "./index.css",
+                },
+            }, null, 2)}\n`,
+            "utf8",
+        );
+        await fs.writeFile(
+            path.join(tailwindDir, "index.cjs"),
+            exposesCanonicalizer
+                ? `module.exports = { __unstable__loadDesignSystem: async () => ({ canonicalizeCandidates: (candidates) => candidates }) };\n`
+                : `module.exports = { __unstable__loadDesignSystem: async () => ({}) };\n`,
+            "utf8",
+        );
+        await fs.writeFile(path.join(tailwindDir, "index.css"), "/* fake project Tailwind */\n", "utf8");
+        await fs.writeFile(
+            path.join(dir, "Input.vue"),
+            `<template><div class="bg-[#FFF]"></div></template>\n`,
+            "utf8",
+        );
+
+        try {
+            const result = await run(NODE_BIN, [NORMWIND_BIN, "Input.vue", "--json"], { cwd: dir });
+            assert(
+                result.exitCode === 0,
+                `Tailwind ${version} compatibility run failed\n${result.stdout}\n${result.stderr}`,
+            );
+            const payload = parseCliJson(result.stdout);
+            assert(
+                payload.findingCount === 0,
+                `bundled Tailwind canonicalization leaked into Tailwind ${version}: ${result.stdout}`,
+            );
+            const cache = await readJson(
+                path.join(dir, "node_modules", ".cache", "normwinds", "canonical-cache.json"),
+            );
+            assert(
+                cache.tailwindVersion === version,
+                `cache used ${cache.tailwindVersion} instead of project Tailwind ${version}`,
+            );
+        } finally {
+            await rmrf(dir);
+        }
+    }
+
+    // Tailwind 4.1+ exposes canonicalizeCandidates. Tailwind 4.0 does not;
+    // arbitrary canonicalization must safely become a no-op there rather than
+    // applying newer bundled semantics or crashing.
+    await runWithFakeTailwind("4.2.4", { exposesCanonicalizer: true });
+    await runWithFakeTailwind("4.0.17", { exposesCanonicalizer: false });
+});
+
 addCheck("CLI smoke audit/fix", async () => {
     const dir = path.join(os.tmpdir(), `normwind-smoke-${Date.now()}`);
     await fs.mkdir(dir, { recursive: true });
