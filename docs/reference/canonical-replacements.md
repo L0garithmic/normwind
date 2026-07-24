@@ -5,7 +5,7 @@ This file is generated from Tailwind's canonicalization engine.
 - Source engine: `tailwindcss.designSystem.canonicalizeCandidates`
 - Tailwind version: `4.2.4`
 - Class list scanned: `22685`
-- Canonical replacements extracted: `12086`
+- Canonical replacements extracted: `12069`
 
 ## Drift Prevention
 

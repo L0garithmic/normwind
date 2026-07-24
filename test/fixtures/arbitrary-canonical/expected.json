@@ -1,7 +1,7 @@
 {
   "ruleId": "tailwindcss/enforces-shorthand",
   "lintedFiles": 1,
-  "findingCount": 5,
+  "findingCount": 6,
   "findings": [
     {
       "filePath": "input.vue",
@@ -32,6 +32,12 @@
       "line": 4,
       "column": 26,
       "message": "The class 'm-[8px]' can be written as 'm-2'"
+    },
+    {
+      "filePath": "input.vue",
+      "line": 4,
+      "column": 34,
+      "message": "The class 'bg-[oklch(96.2%_0.059_95.617)]' can be written as 'bg-amber-100'"
     }
   ]
 }

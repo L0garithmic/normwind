@@ -1,0 +1,5 @@
+@import "./a.css";
+@theme {
+    --color-middle: var(--root-middle);
+}
+@import "./b.css";

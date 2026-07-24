@@ -1,0 +1,19 @@
+{
+  "ruleId": "tailwindcss/enforces-shorthand",
+  "lintedFiles": 1,
+  "findingCount": 2,
+  "findings": [
+    {
+      "filePath": "input.vue",
+      "line": 6,
+      "column": 37,
+      "message": "Classnames 'pl-2, pr-2' could be replaced by the 'px-2' shorthand!"
+    },
+    {
+      "filePath": "input.vue",
+      "line": 16,
+      "column": 83,
+      "message": "Classnames 'w-4, h-4' could be replaced by the 'size-4' shorthand!"
+    }
+  ]
+}

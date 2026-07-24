@@ -1,0 +1,31 @@
+{
+  "ruleId": "tailwindcss/enforces-shorthand",
+  "lintedFiles": 1,
+  "findingCount": 4,
+  "findings": [
+    {
+      "filePath": "input.tsx",
+      "line": 15,
+      "column": 57,
+      "message": "Classnames 'px-4, py-4' could be replaced by the 'p-4' shorthand!"
+    },
+    {
+      "filePath": "input.tsx",
+      "line": 16,
+      "column": 70,
+      "message": "Classnames 'mt-2, mb-2' could be replaced by the 'my-2' shorthand!"
+    },
+    {
+      "filePath": "input.tsx",
+      "line": 18,
+      "column": 13,
+      "message": "Classnames 'w-4, h-4' could be replaced by the 'size-4' shorthand!"
+    },
+    {
+      "filePath": "input.tsx",
+      "line": 20,
+      "column": 43,
+      "message": "Classnames 'pl-2, pr-2' could be replaced by the 'px-2' shorthand!"
+    }
+  ]
+}

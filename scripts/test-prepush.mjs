@@ -78,6 +78,7 @@ addCheck("package metadata", async () => {
     assert(pkg.type === "module", "package must remain ESM");
     assert(pkg.bin?.normwind === "bin/normwind.mjs", "normwind bin mapping is missing");
     assert(pkg.bin?.normwinds === "bin/normwind.mjs", "normwinds alias mapping is missing");
+    assert(pkg.dependencies?.["@babel/parser"], "@babel/parser dependency is missing");
     assert(pkg.dependencies?.tailwindcss, "tailwindcss dependency is missing");
     assert(pkg.dependencies?.["eslint-plugin-tailwindcss"], "eslint-plugin-tailwindcss dependency is missing");
     assert(!pkg.dependencies?.eslint, "eslint must not be a runtime dependency");
@@ -88,6 +89,26 @@ addCheck("package metadata", async () => {
     assert(pkg.scripts?.["canonical:check"], "canonical:check script is missing");
     assert(pkg.scripts?.["test:regression"], "test:regression script is missing");
     assert(pkg.scripts?.["test:compare"], "test:compare script is missing");
+});
+
+addCheck("workflow and release hardening", async () => {
+    const ci = await fs.readFile(path.join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
+    const releaseWorkflow = await fs.readFile(
+        path.join(REPO_ROOT, ".github", "workflows", "release.yml"),
+        "utf8",
+    );
+    const releaseScript = await fs.readFile(path.join(REPO_ROOT, "scripts", "release.py"), "utf8");
+    const workflowText = `${ci}\n${releaseWorkflow}`;
+    const actionRefs = [...workflowText.matchAll(/uses:\s+[^@\s]+@([^\s#]+)/g)].map((match) => match[1]);
+    assert(actionRefs.length > 0, "workflows contain no action references");
+    assert(
+        actionRefs.every((ref) => /^[0-9a-f]{40}$/.test(ref)),
+        `every action must be pinned to a full commit SHA: ${actionRefs.join(", ")}`,
+    );
+    assert(/permissions:\s*\n\s+contents:\s+read/.test(ci), "CI must explicitly use read-only contents permission");
+    assert(!releaseScript.includes("remote set-url"), "release script must not persist a PAT in the origin URL");
+    assert(!releaseScript.includes('"--tags"'), "release script must not push unrelated local tags");
+    assert(releaseScript.includes('"--atomic"'), "release script should push main and the release tag atomically");
 });
 
 addCheck("canonical snapshot integrity", async () => {
@@ -197,6 +218,99 @@ addCheck("CLI smoke audit/fix", async () => {
     }
 });
 
+addCheck("stale cache invalidation and compaction", async () => {
+    const dir = path.join(os.tmpdir(), `normwind-stale-cache-${Date.now()}`);
+    const cacheDir = path.join(dir, "node_modules", ".cache", "normwinds");
+    const cachePath = path.join(cacheDir, "canonical-cache.json");
+    const filePath = path.join(dir, "Input.vue");
+    const candidate = "w-[777.123px]";
+    await fs.mkdir(cacheDir, { recursive: true });
+    await fs.writeFile(
+        cachePath,
+        JSON.stringify({
+            schema: 1,
+            tailwindVersion: "0.0.0-stale",
+            entries: { [candidate]: "w-full" },
+        }),
+        "utf8",
+    );
+    await fs.writeFile(
+        filePath,
+        `<template><div class="${candidate}"></div></template>\n`,
+        "utf8",
+    );
+
+    try {
+        const result = await run(NODE_BIN, [NORMWIND_BIN, "Input.vue", "--json"], { cwd: dir });
+        assert(result.exitCode === 0, `stale cache must not create a false finding\n${result.stdout}\n${result.stderr}`);
+        const payload = JSON.parse(result.stdout);
+        assert(payload.findingCount === 0, `stale cached replacement leaked into findings: ${result.stdout}`);
+
+        const rewrittenCache = await readJson(cachePath);
+        const tailwindPkg = await readJson(path.join(REPO_ROOT, "node_modules", "tailwindcss", "package.json"));
+        assert(
+            rewrittenCache.tailwindVersion === tailwindPkg.version,
+            `cache version was not refreshed: ${rewrittenCache.tailwindVersion}`,
+        );
+        assert(
+            rewrittenCache.entries[candidate] === candidate,
+            `live canonical result was not persisted safely: ${JSON.stringify(rewrittenCache.entries)}`,
+        );
+
+        // Simulate a pre-compaction cache that redundantly stored a bundled
+        // snapshot key. The next run should remove it while retaining the
+        // genuinely dynamic entry.
+        rewrittenCache.entries["rounded-[24px]"] = "rounded-3xl";
+        await fs.writeFile(cachePath, JSON.stringify(rewrittenCache), "utf8");
+        const compactRun = await run(NODE_BIN, [NORMWIND_BIN, "Input.vue", "--json"], { cwd: dir });
+        assert(compactRun.exitCode === 0, `cache compaction run failed\n${compactRun.stderr}`);
+        const compactedCache = await readJson(cachePath);
+        assert(
+            !Object.prototype.hasOwnProperty.call(compactedCache.entries, "rounded-[24px]"),
+            "writable cache retained an entry already supplied by the bundled snapshot",
+        );
+        assert(
+            Object.keys(compactedCache.entries).length < 10,
+            `writable cache should not duplicate the bundled snapshot: ${Object.keys(compactedCache.entries).length}`,
+        );
+    } finally {
+        await rmrf(dir);
+    }
+});
+
+addCheck("live canonicalization candidate limit", async () => {
+    const dir = path.join(os.tmpdir(), `normwind-canonical-limit-${Date.now()}`);
+    await fs.mkdir(dir, { recursive: true });
+    const tokens = Array.from({ length: 1001 }, (_, i) => `w-[${100000 + i}.123px]`);
+    await fs.writeFile(
+        path.join(dir, "Many.vue"),
+        `<template><div class="${tokens.join(" ")}"></div></template>\n`,
+        "utf8",
+    );
+
+    try {
+        const result = await run(NODE_BIN, [NORMWIND_BIN, "Many.vue", "--json"], { cwd: dir });
+        assert(result.exitCode === 2, `candidate-limit breach should exit 2, got ${result.exitCode}`);
+        assert(
+            result.stderr.includes("refusing to live-canonicalize 1001 unique cache misses"),
+            `candidate-limit error was not actionable:\n${result.stderr}`,
+        );
+
+        const fixResult = await run(
+            NODE_BIN,
+            [NORMWIND_BIN, "Many.vue", "--fixall", "--dry-run", "--json"],
+            { cwd: dir },
+        );
+        assert(fixResult.exitCode === 2, `fix candidate-limit breach should exit 2, got ${fixResult.exitCode}`);
+        assert(
+            fixResult.stderr.includes("unique cache misses during fixes"),
+            `fix path did not enforce the candidate limit:\n${fixResult.stderr}`,
+        );
+    } finally {
+        await rmrf(dir);
+    }
+});
+
 addCheck("dry-run writes nothing", async () => {
     const dir = path.join(os.tmpdir(), `normwind-dry-run-${Date.now()}`);
     await fs.mkdir(dir, { recursive: true });
@@ -205,9 +319,11 @@ addCheck("dry-run writes nothing", async () => {
     await fs.writeFile(filePath, source, "utf8");
 
     try {
-        const result = await run(NODE_BIN, [NORMWIND_BIN, "--fixall", "--dry-run"], { cwd: dir });
+        const result = await run(NODE_BIN, [NORMWIND_BIN, "--fixall", "--dry-run", "--json"], { cwd: dir });
         assert(result.exitCode === 1, `dry-run should still exit 1 (findings remain), got ${result.exitCode}\n${result.stdout}\n${result.stderr}`);
-        assert(result.stdout.includes("[dry-run] would rewrite"), `dry-run should announce the would-be rewrite\n${result.stdout}`);
+        assert(result.stderr.includes("[dry-run] would rewrite"), `dry-run should announce the would-be rewrite on stderr\n${result.stderr}`);
+        const payload = JSON.parse(result.stdout);
+        assert(payload.findingCount > 0, `dry-run JSON should remain machine-parseable and contain findings: ${result.stdout}`);
         const untouched = await fs.readFile(filePath, "utf8");
         assert(untouched === source, `--dry-run must not modify the file on disk: ${untouched}`);
     } finally {
@@ -283,6 +399,89 @@ addCheck("fixall fault isolation: transform throw", async () => {
     }
 });
 
+addCheck("fixall detects concurrent edits", async () => {
+    const dir = path.join(os.tmpdir(), `normwind-concurrent-edit-${Date.now()}`);
+    await fs.mkdir(dir, { recursive: true });
+    const filePath = path.join(dir, "Race.vue");
+    await fs.writeFile(
+        filePath,
+        `<template>\n  <div class="px-4 py-4">Race</div>\n</template>\n`,
+        "utf8",
+    );
+
+    try {
+        const result = await run(NODE_BIN, [NORMWIND_BIN, "--fixall"], {
+            cwd: dir,
+            env: { NORMWIND_TEST_MUTATE_BEFORE_RENAME: "Race.vue" },
+        });
+        assert(result.exitCode === 2, `concurrent edit should make the run partial, got ${result.exitCode}`);
+        assert(result.stderr.includes("file changed while fixes were being prepared"), result.stderr);
+        const content = await fs.readFile(filePath, "utf8");
+        assert(content.includes("px-4 py-4"), `fixer overwrote the original class edit: ${content}`);
+        assert(content.includes("simulated concurrent editor save"), `simulated editor content was lost: ${content}`);
+        const leftoverTmp = (await fs.readdir(dir)).filter((name) => name.includes(".normwinds-tmp-"));
+        assert(leftoverTmp.length === 0, `temp file must be cleaned up after a conflict: ${leftoverTmp.join(", ")}`);
+    } finally {
+        await rmrf(dir);
+    }
+});
+
+addCheck("syntax-aware extraction fails closed", async () => {
+    const dir = path.join(os.tmpdir(), `normwind-parse-failure-${Date.now()}`);
+    await fs.mkdir(dir, { recursive: true });
+    const filePath = path.join(dir, "Broken.tsx");
+    const original = [
+        "export const broken = (;",
+        '// <div className="px-4 py-4">must never be rewritten</div>',
+        "",
+    ].join("\n");
+    await fs.writeFile(filePath, original, "utf8");
+
+    try {
+        const audit = await run(NODE_BIN, [NORMWIND_BIN, "--json"], { cwd: dir });
+        assert(audit.exitCode === 2, `parse failure audit should exit 2, got ${audit.exitCode}`);
+        assert(
+            audit.stderr.includes("[failed:parse]") && audit.stderr.includes("Broken.tsx"),
+            `parse failure should be identified precisely:\n${audit.stderr}`,
+        );
+        const payload = parseCliJson(audit.stdout);
+        assert(payload.lintedFiles === 0, `unparsed file must not count as linted: ${audit.stdout}`);
+
+        const fix = await run(NODE_BIN, [NORMWIND_BIN, "--fixall"], { cwd: dir });
+        assert(fix.exitCode === 2, `parse failure fix should exit 2, got ${fix.exitCode}`);
+        assert(
+            await fs.readFile(filePath, "utf8") === original,
+            "a source file that cannot be parsed must remain byte-for-byte unchanged",
+        );
+    } finally {
+        await rmrf(dir);
+    }
+});
+
+addCheck("fixall preserves Unix file mode", async () => {
+    if (process.platform === "win32") {
+        return;
+    }
+    const dir = path.join(os.tmpdir(), `normwind-file-mode-${Date.now()}`);
+    await fs.mkdir(dir, { recursive: true });
+    const filePath = path.join(dir, "Executable.js");
+    await fs.writeFile(
+        filePath,
+        `#!/usr/bin/env node\nexport const html = h("div", { class: "px-4 py-4" });\n`,
+        { encoding: "utf8", mode: 0o755 },
+    );
+    await fs.chmod(filePath, 0o755);
+
+    try {
+        const result = await run(NODE_BIN, [NORMWIND_BIN, "Executable.js", "--fixall"], { cwd: dir });
+        assert(result.exitCode === 0, `mode-preservation fix failed\n${result.stdout}\n${result.stderr}`);
+        const mode = (await fs.stat(filePath)).mode & 0o777;
+        assert(mode === 0o755, `expected executable mode 0755 after rewrite, got 0${mode.toString(8)}`);
+    } finally {
+        await rmrf(dir);
+    }
+});
+
 addCheck("max-file-size skip", async () => {
     const dir = path.join(os.tmpdir(), `normwind-max-size-${Date.now()}`);
     await fs.mkdir(dir, { recursive: true });
@@ -295,14 +494,14 @@ addCheck("max-file-size skip", async () => {
 
     try {
         const audit = await run(NODE_BIN, [NORMWIND_BIN, "--json"], { cwd: dir });
-        assert(audit.exitCode === 1, `audit should exit 1 for the still-findable small file, got ${audit.exitCode}\n${audit.stderr}`);
+        assert(audit.exitCode === 2, `audit should exit 2 when any matched file is skipped, got ${audit.exitCode}\n${audit.stderr}`);
         assert(audit.stderr.includes("Big.tsx") && audit.stderr.includes("scan limit"), `oversized file skip should be logged:\n${audit.stderr}`);
         const payload = parseCliJson(audit.stdout);
         assert(payload.findings.every((f) => !f.filePath.includes("Big.tsx")), `oversized file must not produce findings: ${JSON.stringify(payload.findings)}`);
         assert(payload.findings.some((f) => f.filePath.includes("Small.tsx")), `small sibling file should still be scanned: ${JSON.stringify(payload.findings)}`);
 
         const fix = await run(NODE_BIN, [NORMWIND_BIN, "--fixall"], { cwd: dir });
-        assert(fix.exitCode === 0, `fixall should exit 0 (oversized file skipped, not failed), got ${fix.exitCode}\n${fix.stdout}\n${fix.stderr}`);
+        assert(fix.exitCode === 2, `fixall should exit 2 when an oversized file is skipped, got ${fix.exitCode}\n${fix.stdout}\n${fix.stderr}`);
         const bigContent = await fs.readFile(bigPath, "utf8");
         assert(bigContent === oversized, "oversized file must be left completely untouched by --fixall");
     } finally {
@@ -367,6 +566,37 @@ addCheck("ripgrep-fallback parity", async () => {
             JSON.stringify(normalizeFindings(normalPayload)) === JSON.stringify(normalizeFindings(noRgPayload)),
             `findings diverged between rg and walk fallback\nrg: ${JSON.stringify(normalPayload.findings)}\nwalk: ${JSON.stringify(noRgPayload.findings)}`,
         );
+    } finally {
+        await rmrf(dir);
+    }
+});
+
+addCheck("directory and glob targets are unioned", async () => {
+    const dir = path.join(os.tmpdir(), `normwind-target-union-${Date.now()}`);
+    await fs.mkdir(path.join(dir, "src"), { recursive: true });
+    await fs.mkdir(path.join(dir, "other"), { recursive: true });
+    await fs.writeFile(
+        path.join(dir, "src", "One.vue"),
+        `<template><div class="px-2 py-2">One</div></template>\n`,
+        "utf8",
+    );
+    await fs.writeFile(
+        path.join(dir, "other", "Two.vue"),
+        `<template><div class="mt-3 mb-3">Two</div></template>\n`,
+        "utf8",
+    );
+
+    try {
+        const result = await run(
+            NODE_BIN,
+            [NORMWIND_BIN, "src", "other/*.vue", "--json"],
+            { cwd: dir },
+        );
+        assert(result.exitCode === 1, `unioned target audit should find both files\n${result.stdout}\n${result.stderr}`);
+        const payload = JSON.parse(result.stdout);
+        assert(payload.lintedFiles === 2, `expected both directory and glob targets, got ${payload.lintedFiles}`);
+        const paths = new Set(payload.findings.map((finding) => finding.filePath));
+        assert(paths.has("src/One.vue") && paths.has("other/Two.vue"), JSON.stringify(payload.findings));
     } finally {
         await rmrf(dir);
     }

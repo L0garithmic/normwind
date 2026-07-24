@@ -1,0 +1,13 @@
+{
+  "ruleId": "tailwindcss/enforces-shorthand",
+  "lintedFiles": 1,
+  "findingCount": 1,
+  "findings": [
+    {
+      "filePath": "input.vue",
+      "line": 1,
+      "column": 23,
+      "message": "The class 'border-(--root-b)' can be written as 'border-middle'"
+    }
+  ]
+}

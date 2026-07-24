@@ -214,7 +214,7 @@ Each file's read, transform, and write are isolated: a locked file (`EBUSY`/`EPE
 
 Add `--dry-run` to either `--fix` or `--fixall` to see which files would be rewritten — each is printed as `[dry-run] would rewrite <path>` — without touching anything on disk. Combine it with `--json` to get the same findings a real run would report, so you can review the diff a rewrite would produce before committing to it.
 
-> **Always run NormWind's autofix from a clean working tree under version control** (git or equivalent), and review the diff before committing. `--fix`/`--fixall` write through an atomic temp-file-then-rename per file, so a crash or interrupted run can't truncate a source file — but a working-tree safety net (commit, stash, or branch) is still the only way to cheaply undo a rewrite you don't like. `--dry-run` is the no-risk way to preview first.
+> **Always run NormWind's autofix from a clean working tree under version control** (git or equivalent), and review the diff before committing. `--fix`/`--fixall` write through an atomic temp-file-then-rename per file, preserve Unix file modes, and refuse to replace a file that changed after it was read. A working-tree safety net (commit, stash, or branch) is still the only way to cheaply undo a rewrite you don't like. `--dry-run` is the no-risk way to preview first.
 
 ## 📁 File matching
 
@@ -243,12 +243,14 @@ A pattern that matches no files prints a warning instead of failing silently.
 NormWind only audits and fixes class strings anchored to class-bearing attributes:
 
 - `class="..."`, `className="..."`, `:class="..."`, and `v-bind:class="..."` — quoted values, JSX-brace values (`className={...}`), quoted strings nested inside those values (ternaries, object/array bindings), and static chunks of template literals.
-- Object-property form — `{ class: "..." }` / `{ className: "..." }` as used by `createElement`/hyperscript/render-function calls.
+- Object-property form — `{ class: "..." }` / `{ className: "..." }` when the object is passed directly to a recognized React/Vue/Preact-style render function such as `createElement`, `h`, `jsx`, or an imported alias of one of them.
 - Attribute names that merely *end* in `-class` (e.g. `data-class`) are excluded — only the exact attribute names above match.
 - Template-literal `${...}` interpolations no longer disqualify the whole literal; static chunks around an interpolation are still processed, and partial tokens straddling an interpolation boundary (e.g. `` h-${size} ``) are never touched.
 - Class strings containing a bare `*` outside `[...]`/`(...)` brackets are conservatively skipped by both the audit and the fixer.
 
-**Guarantee:** strings outside class-bearing attributes — SQL fragments, `title="..."` text, arbitrary object keys, etc. — are never inspected or modified. Earlier versions scanned every quoted string in a file; that behavior is gone.
+JavaScript, TypeScript, and JSX/TSX are parsed before extraction, and Vue SFC template/script boundaries are tracked structurally. Comments, serialized markup, regex literals, interpolated template text outside class props, `title="..."` text, and unrelated `{ class: "..." }` data objects are therefore excluded. If a supported JavaScript/TypeScript source block cannot be parsed safely, the file is reported as failed and is left untouched.
+
+**Guarantee:** strings outside real class-bearing attributes and recognized render-function props are never inspected or modified. Earlier versions scanned every quoted string in a file; that behavior is gone.
 
 <details>
 <summary><strong>🎨 Named theme variables — <code>--suggest-named-theme-vars</code> / <code>--theme-css</code> (advanced)</strong></summary>
@@ -318,6 +320,8 @@ It's generated from Tailwind's own canonicalization engine for the exact Tailwin
 2. The package-bundled snapshot.
 3. Tailwind's live design-system canonicalizer, for cache misses or a missing snapshot.
 
+Disk-cache entries are validated against the installed Tailwind version before use and are written atomically. To keep scans of untrusted code resource-bounded, a single run refuses to send more than 1,000 unique cache misses through Tailwind's live canonicalizer; that condition is reported as a runtime error instead of risking a Node out-of-memory crash.
+
 Maintainers can regenerate and verify it:
 
 ```bash
@@ -383,6 +387,20 @@ NormWind deliberately uses `eslint-plugin-tailwindcss`'s **static group data** i
 </details>
 
 ## 📜 Changelog
+
+<details>
+<summary><strong>v3.6.0</strong> — 2026-07-24 · syntax-aware safety, bounded canonicalization, release hardening</summary>
+
+<br/>
+
+- **Syntax-aware extraction** — JavaScript, TypeScript, JSX, and TSX are parsed before class strings are collected, while Vue SFC template/script boundaries are tracked structurally. Comments, serialized markup, regex literals, interpolations outside class props, and unrelated `{ class: "..." }` data objects are no longer audit/fix candidates. Render-prop objects remain supported for recognized `h`/`createElement`/JSX-runtime calls and imported aliases.
+- **Fail-closed autofix** — unparseable source, oversized files, read/stat failures, symlinks, concurrent editor saves, and per-file transform/write failures are surfaced with exit `2`; unsafe files are left untouched while independent files continue. Atomic rewrites preserve Unix mode bits.
+- **Bounded canonicalization and cache validation** — live Tailwind canonicalization is capped, on-disk cache data is type/size validated, stale snapshot entries are compacted away, and cache replacement is atomic. Generated canonical data now encodes candidate spaces correctly and includes an arbitrary-color regression.
+- **Audit/fix parity** — reverse size shorthands, arbitrary variants, equal width/height values, and named theme-variable import ordering now follow the same matching rules in audit and fix paths.
+- **Target and output correctness** — explicit directories and glob patterns are unioned, `lintedFiles` reflects successfully scanned files, skipped/failed work is summarized, and `--dry-run --json` keeps stdout machine-readable.
+- **Release and CI hardening** — GitHub Actions are commit-SHA pinned with least-privilege permissions and timeouts, Dependabot covers npm and Actions, the release helper validates strict SemVer, stages/pushes exact release refs atomically, keeps GitHub credentials out of remotes/arguments, rolls back failed bumps, and uses network timeouts.
+
+</details>
 
 <details>
 <summary><strong>v3.5.0</strong> — 2026-07-09 · fault isolation, classifier parity, --dry-run, corner-family merger</summary>
@@ -486,7 +504,7 @@ NormWind deliberately uses `eslint-plugin-tailwindcss`'s **static group data** i
 
 <br/>
 
-- **Bundled canonical snapshot** — ships `docs/reference/canonical-replacements.json` (12,086 entries) generated from Tailwind's own `designSystem.canonicalizeCandidates` engine; no cold boot on first run.
+- **Bundled canonical snapshot** — ships `docs/reference/canonical-replacements.json` (12,069 entries) generated from Tailwind's own `designSystem.canonicalizeCandidates` engine; no cold boot on first run.
 - **`--check-canonical` flag** — exits `1` when the bundled snapshot is missing or stale; CI-suitable.
 - **`canonical:extract` / `canonical:check` scripts** — the maintainer workflow for regenerating and verifying the snapshot.
 - **7-fixture regression harness**, **live-vs-snapshot parity test**, and a **7-check pre-push suite**.

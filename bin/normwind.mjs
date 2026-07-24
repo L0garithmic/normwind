@@ -20,6 +20,10 @@ const RULE_ID = "tailwindcss/enforces-shorthand";
 const DEFAULT_PATTERNS = ["**/*.{vue,js,mjs,ts,jsx,tsx}"];
 const ROOT_FONT_SIZE_PX = 16;
 const FILE_SCAN_CONCURRENCY = 32;
+// Tailwind's unstable canonicalizer grows very quickly with thousands of
+// unique cache misses. Fail predictably before a small adversarial source file
+// can exhaust the Node heap.
+const MAX_LIVE_CANONICALIZATION_CANDIDATES = 1000;
 // A stray large generated file (bundler output, a vendored .js, a data file)
 // landing in a non-ignored directory would otherwise be read whole into
 // memory alongside every other matched file. Real hand-authored .vue/.tsx
@@ -72,6 +76,7 @@ const IGNORED_EXACT_PATHS = new Set(["infra/aws/bin/app.js"]);
 
 const CACHE_FILE = path.resolve(process.cwd(), "node_modules/.cache/normwinds/canonical-cache.json");
 const CACHE_SCHEMA_VERSION = 1;
+const MAX_CACHE_FILE_BYTES = 8 * 1024 * 1024;
 
 let tailwindModuleCache = null;
 function loadTailwind() {
@@ -121,12 +126,16 @@ async function inlineLocalCssImports(sourceCss, sourcePath, visited) {
     const sourceDir = path.dirname(sourcePath);
     const parts = [];
     let lastIndex = 0;
+    // A fresh RegExp per recursion frame is required. Sharing the module-level
+    // global instance lets a nested import reset its parent's lastIndex, which
+    // can duplicate the CSS between imports and change last-declaration-wins
+    // @theme semantics.
+    const importRegex = new RegExp(CSS_IMPORT_REGEX.source, CSS_IMPORT_REGEX.flags);
 
-    CSS_IMPORT_REGEX.lastIndex = 0;
     let match;
-    while ((match = CSS_IMPORT_REGEX.exec(sourceCss)) !== null) {
+    while ((match = importRegex.exec(sourceCss)) !== null) {
         parts.push(sourceCss.slice(lastIndex, match.index));
-        lastIndex = CSS_IMPORT_REGEX.lastIndex;
+        lastIndex = importRegex.lastIndex;
 
         const spec = match[2];
         if (!isLocalCssImportSpecifier(spec)) {
@@ -209,28 +218,67 @@ async function loadAugmentedDesignSystem(themeCssPath) {
 // CANONICAL_MEMO stores token -> canonical (equal to token = no change).
 // Pre-populated from on-disk cache; any new entries are persisted on exit.
 const CANONICAL_MEMO = new Map();
+// Only dynamically-computed entries belong in the writable cache. Snapshot
+// entries are already shipped with the package; persisting all 12k+ of them
+// again needlessly bloats every consumer project's cache.
+const DYNAMIC_CACHE_KEYS = new Set();
 let diskCacheDirty = false;
 let diskCacheTailwindVersion = null;
 
+function isSafeCacheEntry(key, value) {
+    return (
+        typeof key === "string" &&
+        typeof value === "string" &&
+        key.length > 0 &&
+        key.length <= 4096 &&
+        value.length <= 4096 &&
+        !/\s/.test(key) &&
+        !/\s/.test(value) &&
+        !key.includes("\0") &&
+        !/[\0"'`]/.test(value)
+    );
+}
+
 async function loadDiskCache() {
     try {
+        const stats = await fs.stat(CACHE_FILE);
+        if (stats.size > MAX_CACHE_FILE_BYTES) {
+            diskCacheDirty = true;
+            return false;
+        }
+
         const raw = await fs.readFile(CACHE_FILE, "utf8");
         const parsed = JSON.parse(raw);
+        const { tailwindPkg } = loadTailwind();
         if (
             parsed &&
             parsed.schema === CACHE_SCHEMA_VERSION &&
-            parsed.tailwindVersion &&
+            parsed.tailwindVersion === tailwindPkg.version &&
             parsed.entries &&
             typeof parsed.entries === "object"
         ) {
             diskCacheTailwindVersion = parsed.tailwindVersion;
             for (const [k, v] of Object.entries(parsed.entries)) {
-                CANONICAL_MEMO.set(k, v);
+                if (isSafeCacheEntry(k, v)) {
+                    CANONICAL_MEMO.set(k, v);
+                    DYNAMIC_CACHE_KEYS.add(k);
+                } else {
+                    diskCacheDirty = true;
+                }
             }
             return true;
         }
-    } catch {
-        // No cache or invalid — fine.
+        // Replace stale or malformed caches on the next successful run. Cache
+        // version validation happens before entries enter CANONICAL_MEMO so a
+        // fully warm, stale cache can never bypass invalidation.
+        diskCacheTailwindVersion = tailwindPkg.version;
+        diskCacheDirty = true;
+    } catch (error) {
+        // A missing cache is normal. Replace unreadable/malformed caches after
+        // the scan so the same parse failure does not recur forever.
+        if (error?.code !== "ENOENT") {
+            diskCacheDirty = true;
+        }
     }
     return false;
 }
@@ -243,15 +291,28 @@ async function saveDiskCache() {
         const { tailwindPkg } = loadTailwind();
         await fs.mkdir(path.dirname(CACHE_FILE), { recursive: true });
         const entries = Object.create(null);
-        for (const [k, v] of CANONICAL_MEMO.entries()) {
-            entries[k] = v;
+        for (const key of DYNAMIC_CACHE_KEYS) {
+            const value = CANONICAL_MEMO.get(key);
+            if (isSafeCacheEntry(key, value)) {
+                entries[key] = value;
+            }
         }
         const payload = {
             schema: CACHE_SCHEMA_VERSION,
             tailwindVersion: tailwindPkg.version,
             entries,
         };
-        await fs.writeFile(CACHE_FILE, JSON.stringify(payload), "utf8");
+        const tmpPath = `${CACHE_FILE}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
+        try {
+            await fs.writeFile(tmpPath, JSON.stringify(payload), {
+                encoding: "utf8",
+                flag: "wx",
+            });
+            await fs.rename(tmpPath, CACHE_FILE);
+        } catch (error) {
+            await fs.rm(tmpPath, { force: true }).catch(() => {});
+            throw error;
+        }
     } catch {
         // Cache persistence is best-effort — never fail the run.
     }
@@ -281,10 +342,12 @@ async function loadCanonicalSnapshot() {
             for (const replacement of parsed.replacements) {
                 if (
                     replacement &&
-                    typeof replacement.inputClass === "string" &&
-                    typeof replacement.canonicalClass === "string"
+                    isSafeCacheEntry(replacement.inputClass, replacement.canonicalClass)
                 ) {
                     CANONICAL_MEMO.set(replacement.inputClass, replacement.canonicalClass);
+                    if (DYNAMIC_CACHE_KEYS.delete(replacement.inputClass)) {
+                        diskCacheDirty = true;
+                    }
                 }
             }
 
@@ -332,6 +395,7 @@ async function getCanonicalizeCandidate() {
                 })?.[0];
                 const result = (!canonical || /\s/.test(canonical)) ? candidate : canonical;
                 CANONICAL_MEMO.set(candidate, result);
+                DYNAMIC_CACHE_KEYS.add(candidate);
                 diskCacheDirty = true;
                 return result;
             };
@@ -464,6 +528,7 @@ async function getThemeVarResolver({ themeCssPath = null } = {}) {
 
                 const recordMiss = () => {
                     CANONICAL_MEMO.set(cacheKey, "");
+                    DYNAMIC_CACHE_KEYS.add(cacheKey);
                     diskCacheDirty = true;
                     return rawToken;
                 };
@@ -523,6 +588,7 @@ async function getThemeVarResolver({ themeCssPath = null } = {}) {
                 }
 
                 CANONICAL_MEMO.set(cacheKey, candidateRaw);
+                DYNAMIC_CACHE_KEYS.add(cacheKey);
                 diskCacheDirty = true;
                 return candidateRaw;
             };
@@ -1043,7 +1109,11 @@ async function extractCanonicalReplacements({ writeFiles, checkOnly = false }) {
 
         for (const candidateValue of candidateValues) {
             for (const valueVariant of expandValueVariants(candidateValue)) {
-                const inputClass = `${parsed.root}-[${valueVariant}]`;
+                // Tailwind source classes encode spaces inside arbitrary values
+                // as underscores. Literal-space keys can never be looked up
+                // after class strings are tokenized on whitespace.
+                const encodedValue = valueVariant.replace(/\s+/g, "_");
+                const inputClass = `${parsed.root}-[${encodedValue}]`;
                 const canonicalized = designSystem.canonicalizeCandidates([inputClass], {
                     rem: ROOT_FONT_SIZE_PX,
                 })?.[0] ?? inputClass;
@@ -1667,7 +1737,11 @@ function transformFixableClassContent(content, canonicalizeCandidate, themeVarRe
             continue;
         }
 
-        if (canonicalizeCandidate) {
+        // Tailwind's canonicalizer is only relevant to bracket-bearing tokens.
+        // Calling it for every ordinary class in a file merely because some
+        // other class contains `[` is both expensive and inconsistent with the
+        // audit path.
+        if (canonicalizeCandidate && tokens[i].includes("[")) {
             const canonical = canonicalizeCandidate(tokens[i]);
             if (canonical && canonical !== tokens[i]) {
                 tokens[i] = canonical;
@@ -1702,6 +1776,7 @@ function transformFixableClassContent(content, canonicalizeCandidate, themeVarRe
 function applyFixesToText(text, canonicalizeCandidate, {
     allowSingleTokenCanonical = false,
     themeVarResolver = null,
+    filePath = null,
 } = {}) {
     let changed = false;
     let current = text;
@@ -1714,7 +1789,10 @@ function applyFixesToText(text, canonicalizeCandidate, {
     // exposed by a nested rewrite still lands. The cap only guards against a
     // hypothetical rewrite cycle — real inputs settle in one or two passes.
     for (let pass = 0; pass < 10; pass += 1) {
-        const spans = extractClassLikeStrings(current, { allowSingleTokenCanonical });
+        const spans = extractClassLikeStrings(current, {
+            allowSingleTokenCanonical,
+            filePath,
+        });
         let passChanged = false;
         let minAcceptedStart = Infinity;
 
@@ -1747,6 +1825,21 @@ function applyFixesToText(text, canonicalizeCandidate, {
     return { changed, transformed: current };
 }
 
+function collectBracketFixCandidates(sourceText, allowSingleTokenCanonical, filePath) {
+    const candidates = new Set();
+    for (const span of extractClassLikeStrings(sourceText, {
+        allowSingleTokenCanonical,
+        filePath,
+    })) {
+        for (const raw of span.value.trim().split(/\s+/).filter(Boolean)) {
+            if (raw.includes("[") && isLikelyFixUtility(raw)) {
+                candidates.add(raw);
+            }
+        }
+    }
+    return candidates;
+}
+
 async function applyFixes(filePaths, {
     fixAll = false,
     suggestNamedThemeVars = false,
@@ -1758,6 +1851,8 @@ async function applyFixes(filePaths, {
     // abort the batch and silently leave every later file unprocessed.
     const failures = [];
     const skipped = [];
+    const liveCanonicalizationCandidates = new Set();
+    let sharedCanonicalizer = null;
 
     // Resolve the theme CSS once up front so misconfiguration surfaces as a
     // single, loud error rather than a silent per-file no-op. The resolver is
@@ -1778,10 +1873,19 @@ async function applyFixes(filePaths, {
             continue;
         }
 
+        let originalStats;
         try {
-            const stats = await fs.stat(filePath);
-            if (stats.size > MAX_SCANNED_FILE_BYTES) {
-                skipped.push({ filePath, reason: `exceeds ${MAX_SCANNED_FILE_BYTES}-byte scan limit (${stats.size} bytes)` });
+            originalStats = await fs.lstat(filePath);
+            if (originalStats.isSymbolicLink()) {
+                skipped.push({ filePath, reason: "symbolic-link targets are not rewritten" });
+                continue;
+            }
+            if (!originalStats.isFile()) {
+                skipped.push({ filePath, reason: "target is not a regular file" });
+                continue;
+            }
+            if (originalStats.size > MAX_SCANNED_FILE_BYTES) {
+                skipped.push({ filePath, reason: `exceeds ${MAX_SCANNED_FILE_BYTES}-byte scan limit (${originalStats.size} bytes)` });
                 continue;
             }
         } catch (error) {
@@ -1810,22 +1914,47 @@ async function applyFixes(filePaths, {
                 throw new Error("normwinds: forced transform throw (NORMWIND_TEST_FORCE_TRANSFORM_THROW)");
             }
 
-            const canonicalizeCandidate = sourceText.includes("[")
-                ? await getCanonicalizeCandidate().catch(() => null)
+            const allowSingleTokenCanonical = filePath.endsWith(".vue");
+            const bracketCandidates = collectBracketFixCandidates(
+                sourceText,
+                allowSingleTokenCanonical,
+                filePath,
+            );
+            let hasCanonicalCacheMiss = false;
+            for (const candidate of bracketCandidates) {
+                if (CANONICAL_MEMO.has(candidate)) {
+                    continue;
+                }
+                hasCanonicalCacheMiss = true;
+                liveCanonicalizationCandidates.add(candidate);
+            }
+            if (liveCanonicalizationCandidates.size > MAX_LIVE_CANONICALIZATION_CANDIDATES) {
+                throw new Error(
+                    `normwinds: refusing to live-canonicalize more than ${MAX_LIVE_CANONICALIZATION_CANDIDATES} unique cache misses during fixes`,
+                );
+            }
+            if (hasCanonicalCacheMiss && !sharedCanonicalizer) {
+                sharedCanonicalizer = await getCanonicalizeCandidate();
+            }
+            const canonicalizeCandidate = bracketCandidates.size > 0
+                ? (sharedCanonicalizer ?? lookupCanonicalFromMemo)
                 : null;
             const themeVarResolver = sharedThemeVarResolver && /\(--|\[var\(--/.test(sourceText)
                 ? sharedThemeVarResolver
                 : null;
             const { changed, transformed } = applyFixesToText(sourceText, canonicalizeCandidate, {
-                allowSingleTokenCanonical: filePath.endsWith(".vue"),
+                allowSingleTokenCanonical,
                 themeVarResolver,
+                filePath,
             });
             if (!changed) {
                 continue;
             }
 
             if (dryRun) {
-                console.log(`normwinds: [dry-run] would rewrite ${filePath}`);
+                // Keep --json stdout machine-parseable. Human progress belongs
+                // on stderr in both text and JSON modes.
+                console.error(`normwinds: [dry-run] would rewrite ${filePath}`);
                 changedFiles += 1;
                 continue;
             }
@@ -1836,11 +1965,32 @@ async function applyFixes(filePaths, {
             // volume, which the sibling temp path guarantees.
             const tmpPath = `${filePath}.normwinds-tmp-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
             try {
-                await fs.writeFile(tmpPath, transformed, "utf8");
+                await fs.writeFile(tmpPath, transformed, {
+                    encoding: "utf8",
+                    flag: "wx",
+                    mode: originalStats.mode,
+                });
+                if (process.platform !== "win32") {
+                    await fs.chmod(tmpPath, originalStats.mode);
+                }
                 if (process.env.NORMWIND_TEST_FORCE_WRITE_FAIL === path.basename(filePath)) {
                     const forced = new Error("normwinds: forced write failure (NORMWIND_TEST_FORCE_WRITE_FAIL)");
                     forced.code = "EPERM";
                     throw forced;
+                }
+                if (process.env.NORMWIND_TEST_MUTATE_BEFORE_RENAME === path.basename(filePath)) {
+                    await fs.appendFile(filePath, "\n// simulated concurrent editor save\n", "utf8");
+                }
+
+                // Refuse to replace a file that changed after we read it. This
+                // closes the common editor-save race where an atomic rename
+                // would otherwise preserve a valid file while still discarding
+                // newer user content.
+                const latestSource = await fs.readFile(filePath, "utf8");
+                if (latestSource !== sourceText) {
+                    const conflict = new Error("file changed while fixes were being prepared");
+                    conflict.code = "ESTALE";
+                    throw conflict;
                 }
                 await fs.rename(tmpPath, filePath);
             } catch (error) {
@@ -1908,13 +2058,26 @@ function detectComplexEquivalences(groupedTokens, filePath, line, column, found)
             );
         }
 
-        const widthToken = tokens.find((token) => token.utility.startsWith("w-"));
-        const heightToken = tokens.find((token) => token.utility.startsWith("h-"));
-        if (widthToken && heightToken) {
+        // Check every distinct width value rather than only the first w-/h-
+        // tokens. The fixer already searches all pairs, so stopping at the first
+        // conflicting width made an audit-clean file still change under
+        // --fixall (for example: `w-4 w-6 h-6`).
+        const heightsByValue = new Map();
+        for (const token of tokens) {
+            if (token.utility.startsWith("h-") && !heightsByValue.has(token.utility.slice(2))) {
+                heightsByValue.set(token.utility.slice(2), token);
+            }
+        }
+        const emittedSizeValues = new Set();
+        for (const widthToken of tokens) {
+            if (!widthToken.utility.startsWith("w-")) {
+                continue;
+            }
             const widthValue = widthToken.utility.slice(2);
-            const heightValue = heightToken.utility.slice(2);
+            const heightToken = heightsByValue.get(widthValue);
             const sizeUtility = `size-${widthValue}`;
-            if (widthValue === heightValue && !utilities.has(sizeUtility)) {
+            if (heightToken && !utilities.has(sizeUtility) && !emittedSizeValues.has(widthValue)) {
+                emittedSizeValues.add(widthValue);
                 emitSuggestion(
                     found,
                     filePath,
@@ -2325,10 +2488,506 @@ function extractNestedQuotedClassStrings(value, baseIndex, options, quoteKinds =
 const CLASS_ATTR_VALUE_REGEX = /(?<![\w-])(?:v-bind:class|className|:class|class)\s*=\s*(["'])([\s\S]*?)\1/g;
 const CLASS_ATTR_BRACE_REGEX = /(?<![\w-])(?:className|class)\s*=\s*\{/g;
 // Object-property form: `{ class: '...' }` / `{ className: "..." }` as used
-// by createElement/hyperscript/render-function calls. Gated like nested
-// strings (not trusted like attributes) since a bare `class:` key can appear
-// in looser contexts.
+// by createElement/hyperscript/render-function calls. Syntax analysis below
+// limits these matches to props objects passed to known render functions.
 const CLASS_OBJECT_KEY_REGEX = /(?<![\w-])(?:className|class)\s*:\s*(["'`])((?:\\.|(?!\1)[^\\])*)\1/g;
+const CLASS_ATTRIBUTE_NAMES = new Set(["class", "className", ":class", "v-bind:class"]);
+const RENDER_FUNCTION_NAMES = new Set([
+    "h",
+    "createElement",
+    "createVNode",
+    "createElementVNode",
+    "createBlock",
+    "createElementBlock",
+    "cloneVNode",
+    "jsx",
+    "jsxs",
+    "jsxDEV",
+    "_jsx",
+    "_jsxs",
+    "_jsxDEV",
+]);
+let babelParserModule = null;
+
+function getBabelParser() {
+    babelParserModule ??= require("@babel/parser");
+    return babelParserModule;
+}
+
+function unwrapExpression(node) {
+    let current = node;
+    const wrapperTypes = new Set([
+        "ChainExpression",
+        "ParenthesizedExpression",
+        "TSAsExpression",
+        "TSInstantiationExpression",
+        "TSNonNullExpression",
+        "TSSatisfiesExpression",
+        "TSTypeAssertion",
+        "TypeCastExpression",
+    ]);
+    while (current && wrapperTypes.has(current.type)) {
+        current = current.expression;
+    }
+    return current;
+}
+
+function getCalledFunctionName(callee) {
+    const unwrapped = unwrapExpression(callee);
+    if (unwrapped?.type === "Identifier") {
+        return unwrapped.name;
+    }
+    if (unwrapped?.type === "MemberExpression" || unwrapped?.type === "OptionalMemberExpression") {
+        if (!unwrapped.computed && unwrapped.property?.type === "Identifier") {
+            return unwrapped.property.name;
+        }
+        if (unwrapped.computed && unwrapped.property?.type === "StringLiteral") {
+            return unwrapped.property.value;
+        }
+    }
+    return null;
+}
+
+function getObjectPropertyName(property) {
+    if (property?.type !== "ObjectProperty" || property.computed) {
+        return null;
+    }
+    if (property.key?.type === "Identifier") {
+        return property.key.name;
+    }
+    if (property.key?.type === "StringLiteral") {
+        return property.key.value;
+    }
+    return null;
+}
+
+function analyzeBabelAst(ast, offset = 0) {
+    const allowedAttributeStarts = new Set();
+    const allowedObjectPropertyStarts = new Set();
+    const renderFunctionNames = new Set(RENDER_FUNCTION_NAMES);
+    const aliasPairs = [];
+    const callNodes = [];
+    const stack = [ast];
+
+    while (stack.length > 0) {
+        const node = stack.pop();
+        if (!node || typeof node !== "object") {
+            continue;
+        }
+
+        if (node.type === "JSXAttribute") {
+            const name = node.name?.type === "JSXIdentifier" ? node.name.name : null;
+            if ((name === "class" || name === "className") && Number.isInteger(node.start)) {
+                allowedAttributeStarts.add(offset + node.start);
+            }
+        } else if (node.type === "ImportSpecifier") {
+            const imported = node.imported?.name ?? node.imported?.value;
+            const local = node.local?.name;
+            if (typeof imported === "string" && typeof local === "string") {
+                aliasPairs.push([local, imported]);
+            }
+        } else if (node.type === "VariableDeclarator" && node.id?.type === "Identifier") {
+            const sourceName = getCalledFunctionName(node.init);
+            if (sourceName) {
+                aliasPairs.push([node.id.name, sourceName]);
+            }
+        } else if (node.type === "CallExpression" || node.type === "OptionalCallExpression") {
+            callNodes.push(node);
+        }
+
+        for (const [key, value] of Object.entries(node)) {
+            if (
+                key === "loc"
+                || key === "errors"
+                || key === "comments"
+                || key === "tokens"
+                || key === "extra"
+            ) {
+                continue;
+            }
+            if (Array.isArray(value)) {
+                for (let i = value.length - 1; i >= 0; i -= 1) {
+                    if (value[i] && typeof value[i] === "object") {
+                        stack.push(value[i]);
+                    }
+                }
+            } else if (value && typeof value === "object") {
+                stack.push(value);
+            }
+        }
+    }
+
+    // Resolve imported/local aliases after traversal so source order and the
+    // iterative stack order cannot affect whether a render call is recognized.
+    let addedAlias = true;
+    while (addedAlias) {
+        addedAlias = false;
+        for (const [local, source] of aliasPairs) {
+            if (renderFunctionNames.has(source) && !renderFunctionNames.has(local)) {
+                renderFunctionNames.add(local);
+                addedAlias = true;
+            }
+        }
+    }
+
+    for (const call of callNodes) {
+        const calleeName = getCalledFunctionName(call.callee);
+        if (!calleeName || !renderFunctionNames.has(calleeName)) {
+            continue;
+        }
+
+        // In React/Vue/Preact-style render APIs, the first argument is the
+        // element/component and subsequent direct object arguments are props.
+        for (const argument of call.arguments.slice(1)) {
+            const props = unwrapExpression(argument);
+            if (props?.type !== "ObjectExpression") {
+                continue;
+            }
+            for (const property of props.properties) {
+                const propertyName = getObjectPropertyName(property);
+                if (
+                    (propertyName === "class" || propertyName === "className")
+                    && Number.isInteger(property.key?.start)
+                ) {
+                    allowedObjectPropertyStarts.add(offset + property.key.start);
+                }
+            }
+        }
+    }
+
+    return { allowedAttributeStarts, allowedObjectPropertyStarts };
+}
+
+function parserPluginVariants({ typescript, jsx }) {
+    const syntaxVariants = typescript
+        ? [["typescript"]]
+        : [[], ["flow"]];
+    const decoratorVariants = [
+        ["decorators-legacy"],
+        [["decorators", { decoratorsBeforeExport: true }]],
+    ];
+    const variants = [];
+
+    for (const syntaxPlugins of syntaxVariants) {
+        for (const decoratorPlugins of decoratorVariants) {
+            variants.push([
+                ...syntaxPlugins,
+                ...(jsx ? ["jsx"] : []),
+                ...decoratorPlugins,
+                "explicitResourceManagement",
+                "importAttributes",
+            ]);
+        }
+    }
+    return variants;
+}
+
+function parseAndAnalyzeJavaScript(
+    sourceText,
+    filePath,
+    { typescript = false, jsx = false, offset = 0 } = {},
+) {
+    const { parse } = getBabelParser();
+    let lastError = null;
+
+    for (const plugins of parserPluginVariants({ typescript, jsx })) {
+        try {
+            const ast = parse(sourceText, {
+                sourceType: "unambiguous",
+                sourceFilename: filePath,
+                plugins,
+                errorRecovery: true,
+                attachComment: false,
+                allowAwaitOutsideFunction: true,
+                allowImportExportEverywhere: true,
+                allowNewTargetOutsideFunction: true,
+                allowReturnOutsideFunction: true,
+                allowSuperOutsideMethod: true,
+                allowUndeclaredExports: true,
+            });
+            if (ast.errors?.length > 0) {
+                lastError = ast.errors[0];
+                continue;
+            }
+            return analyzeBabelAst(ast, offset);
+        } catch (error) {
+            lastError = error;
+        }
+    }
+
+    const detail = lastError?.message ?? "unknown parser error";
+    throw new Error(`could not safely parse ${filePath}: ${detail}`);
+}
+
+function findMarkupTagEnd(sourceText, openIndex) {
+    let quote = null;
+    for (let i = openIndex + 1; i < sourceText.length; i += 1) {
+        const ch = sourceText[i];
+        if (quote) {
+            if (ch === quote) {
+                quote = null;
+            }
+            continue;
+        }
+        if (ch === '"' || ch === "'") {
+            quote = ch;
+        } else if (ch === ">") {
+            return i;
+        }
+    }
+    return -1;
+}
+
+function parseMarkupTag(sourceText, openIndex) {
+    const end = findMarkupTagEnd(sourceText, openIndex);
+    if (end === -1) {
+        return null;
+    }
+
+    let cursor = openIndex + 1;
+    while (cursor < end && /\s/.test(sourceText[cursor])) {
+        cursor += 1;
+    }
+    const closing = sourceText[cursor] === "/";
+    if (closing) {
+        cursor += 1;
+        while (cursor < end && /\s/.test(sourceText[cursor])) {
+            cursor += 1;
+        }
+    }
+    const nameStart = cursor;
+    while (cursor < end && !/[\s/>]/.test(sourceText[cursor])) {
+        cursor += 1;
+    }
+    const name = sourceText.slice(nameStart, cursor);
+    if (!name || name.startsWith("!") || name.startsWith("?")) {
+        return { end, closing, name: "", selfClosing: false, attributes: [] };
+    }
+    if (closing) {
+        return {
+            end,
+            closing: true,
+            name,
+            selfClosing: false,
+            attributes: [],
+        };
+    }
+
+    const attributes = [];
+    while (cursor < end) {
+        while (cursor < end && /\s/.test(sourceText[cursor])) {
+            cursor += 1;
+        }
+        if (cursor >= end || sourceText[cursor] === "/") {
+            break;
+        }
+
+        const start = cursor;
+        while (cursor < end && !/[\s=/>]/.test(sourceText[cursor])) {
+            cursor += 1;
+        }
+        const attributeName = sourceText.slice(start, cursor);
+        while (cursor < end && /\s/.test(sourceText[cursor])) {
+            cursor += 1;
+        }
+
+        let value = null;
+        if (sourceText[cursor] === "=") {
+            cursor += 1;
+            while (cursor < end && /\s/.test(sourceText[cursor])) {
+                cursor += 1;
+            }
+            const quote = sourceText[cursor];
+            if (quote === '"' || quote === "'") {
+                const valueStart = cursor + 1;
+                cursor = valueStart;
+                while (cursor < end && sourceText[cursor] !== quote) {
+                    cursor += 1;
+                }
+                value = sourceText.slice(valueStart, cursor);
+                cursor += cursor < end ? 1 : 0;
+            } else if (sourceText[cursor] === "{") {
+                const braceEnd = findBalancedBraceEnd(sourceText, cursor);
+                cursor = braceEnd !== -1 && braceEnd <= end ? braceEnd + 1 : end;
+            } else {
+                const valueStart = cursor;
+                while (cursor < end && !/[\s>]/.test(sourceText[cursor])) {
+                    cursor += 1;
+                }
+                value = sourceText.slice(valueStart, cursor);
+            }
+        }
+        if (attributeName) {
+            attributes.push({ name: attributeName, start, value });
+        } else {
+            cursor += 1;
+        }
+    }
+
+    let slashCursor = end - 1;
+    while (slashCursor > openIndex && /\s/.test(sourceText[slashCursor])) {
+        slashCursor -= 1;
+    }
+    return {
+        end,
+        closing: false,
+        name,
+        selfClosing: sourceText[slashCursor] === "/",
+        attributes,
+    };
+}
+
+function findRawElementClose(sourceText, tagName, fromIndex) {
+    const closeRegex = new RegExp(`</${tagName}\\s*>`, "gi");
+    closeRegex.lastIndex = fromIndex;
+    const match = closeRegex.exec(sourceText);
+    if (!match) {
+        return null;
+    }
+    return { start: match.index, end: match.index + match[0].length };
+}
+
+function analyzeVueStructure(sourceText) {
+    const allowedAttributeStarts = new Set();
+    const scriptBlocks = [];
+    let templateDepth = 0;
+    let cursor = 0;
+
+    while (cursor < sourceText.length) {
+        const nextTag = sourceText.indexOf("<", cursor);
+        const nextInterpolation = templateDepth > 0
+            ? sourceText.indexOf("{{", cursor)
+            : -1;
+
+        if (
+            nextInterpolation !== -1
+            && (nextTag === -1 || nextInterpolation < nextTag)
+        ) {
+            const interpolationEnd = sourceText.indexOf("}}", nextInterpolation + 2);
+            cursor = interpolationEnd === -1 ? sourceText.length : interpolationEnd + 2;
+            continue;
+        }
+        if (nextTag === -1) {
+            break;
+        }
+        if (sourceText.startsWith("<!--", nextTag)) {
+            const commentEnd = sourceText.indexOf("-->", nextTag + 4);
+            cursor = commentEnd === -1 ? sourceText.length : commentEnd + 3;
+            continue;
+        }
+
+        const tag = parseMarkupTag(sourceText, nextTag);
+        if (!tag) {
+            break;
+        }
+        const lowerName = tag.name.toLowerCase();
+
+        if (tag.closing) {
+            if (lowerName === "template" && templateDepth > 0) {
+                templateDepth -= 1;
+            }
+            cursor = tag.end + 1;
+            continue;
+        }
+
+        if (templateDepth > 0 && lowerName !== "template") {
+            for (const attribute of tag.attributes) {
+                if (CLASS_ATTRIBUTE_NAMES.has(attribute.name)) {
+                    allowedAttributeStarts.add(attribute.start);
+                }
+            }
+        }
+
+        if (lowerName === "template" && !tag.selfClosing) {
+            templateDepth += 1;
+            cursor = tag.end + 1;
+            continue;
+        }
+
+        if (templateDepth === 0 && (lowerName === "script" || lowerName === "style")) {
+            const close = findRawElementClose(sourceText, lowerName, tag.end + 1);
+            if (!close) {
+                cursor = sourceText.length;
+                continue;
+            }
+            if (lowerName === "script") {
+                const lang = tag.attributes
+                    .find((attribute) => attribute.name.toLowerCase() === "lang")
+                    ?.value
+                    ?.toLowerCase() ?? "js";
+                scriptBlocks.push({
+                    source: sourceText.slice(tag.end + 1, close.start),
+                    offset: tag.end + 1,
+                    lang,
+                });
+            }
+            cursor = close.end;
+            continue;
+        }
+
+        // Unknown top-level SFC custom blocks are not Vue templates. Skip
+        // their raw contents so embedded markup/data cannot be mistaken for
+        // renderable class attributes.
+        if (templateDepth === 0 && lowerName && !tag.selfClosing) {
+            const close = findRawElementClose(sourceText, lowerName, tag.end + 1);
+            cursor = close ? close.end : tag.end + 1;
+            continue;
+        }
+
+        cursor = tag.end + 1;
+    }
+
+    return { allowedAttributeStarts, scriptBlocks };
+}
+
+function mergeSyntaxAnalysis(target, source) {
+    for (const start of source.allowedAttributeStarts) {
+        target.allowedAttributeStarts.add(start);
+    }
+    for (const start of source.allowedObjectPropertyStarts) {
+        target.allowedObjectPropertyStarts.add(start);
+    }
+}
+
+function analyzeClassSyntax(sourceText, filePath) {
+    const analysis = {
+        allowedAttributeStarts: new Set(),
+        allowedObjectPropertyStarts: new Set(),
+    };
+    const normalizedPath = String(filePath ?? "source.js").toLowerCase();
+    const extension = path.extname(normalizedPath);
+
+    if (extension === ".vue") {
+        const vue = analyzeVueStructure(sourceText);
+        for (const start of vue.allowedAttributeStarts) {
+            analysis.allowedAttributeStarts.add(start);
+        }
+        for (const block of vue.scriptBlocks) {
+            const isTypeScript = ["ts", "tsx", "mts", "cts"].includes(block.lang);
+            const isJavaScript = ["js", "jsx", "mjs", "cjs", "babel"].includes(block.lang);
+            if (!isTypeScript && !isJavaScript) {
+                continue;
+            }
+            const scriptAnalysis = parseAndAnalyzeJavaScript(
+                block.source,
+                `${filePath ?? "source.vue"}?script=${block.lang}`,
+                {
+                    typescript: isTypeScript,
+                    jsx: block.lang === "tsx" || block.lang === "jsx" || isJavaScript,
+                    offset: block.offset,
+                },
+            );
+            mergeSyntaxAnalysis(analysis, scriptAnalysis);
+        }
+        return analysis;
+    }
+
+    const isTypeScript = extension === ".ts" || extension === ".tsx";
+    return parseAndAnalyzeJavaScript(sourceText, filePath ?? "source.js", {
+        typescript: isTypeScript,
+        jsx: extension === ".jsx" || extension === ".tsx" || !isTypeScript,
+    });
+}
 
 // Find the index of the `}` matching the `{` at openIndex, respecting quoted
 // strings inside the expression. Returns -1 when unbalanced.
@@ -2361,7 +3020,17 @@ function findBalancedBraceEnd(text, openIndex) {
     return -1;
 }
 
-function extractClassLikeStrings(sourceText, { allowSingleTokenCanonical = false } = {}) {
+function extractClassLikeStrings(
+    sourceText,
+    { allowSingleTokenCanonical = false, filePath = null } = {},
+) {
+    if (!sourceText.includes("class")) {
+        return [];
+    }
+    const {
+        allowedAttributeStarts,
+        allowedObjectPropertyStarts,
+    } = analyzeClassSyntax(sourceText, filePath);
     const results = [];
     const seen = new Set();
     const push = (value, index) => {
@@ -2376,6 +3045,9 @@ function extractClassLikeStrings(sourceText, { allowSingleTokenCanonical = false
     CLASS_ATTR_VALUE_REGEX.lastIndex = 0;
     let match;
     while ((match = CLASS_ATTR_VALUE_REGEX.exec(sourceText)) !== null) {
+        if (!allowedAttributeStarts.has(match.index)) {
+            continue;
+        }
         const value = match[2];
         // The value sits immediately before the closing quote, so compute its
         // start positionally — indexOf would hit an earlier occurrence for
@@ -2396,6 +3068,9 @@ function extractClassLikeStrings(sourceText, { allowSingleTokenCanonical = false
 
     CLASS_ATTR_BRACE_REGEX.lastIndex = 0;
     while ((match = CLASS_ATTR_BRACE_REGEX.exec(sourceText)) !== null) {
+        if (!allowedAttributeStarts.has(match.index)) {
+            continue;
+        }
         const openIndex = match.index + match[0].length - 1;
         const closeIndex = findBalancedBraceEnd(sourceText, openIndex);
         if (closeIndex === -1) {
@@ -2416,6 +3091,9 @@ function extractClassLikeStrings(sourceText, { allowSingleTokenCanonical = false
 
     CLASS_OBJECT_KEY_REGEX.lastIndex = 0;
     while ((match = CLASS_OBJECT_KEY_REGEX.exec(sourceText)) !== null) {
+        if (!allowedObjectPropertyStarts.has(match.index)) {
+            continue;
+        }
         const value = match[2];
         const startIndex = match.index + match[0].length - 1 - value.length;
 
@@ -2657,21 +3335,20 @@ async function listTargetFiles(patterns) {
             // ripgrep unavailable: walk the tree and apply the globs manually
             // so the fallback discovers the same set rg would have.
             const globRegexes = globPatterns.map(globPatternToRegExp);
-            const roots = directoryTargets.length > 0 ? directoryTargets : [process.cwd()];
-            for (const root of roots) {
-                const walkedFiles = [];
-                await walkDirectory(root, walkedFiles);
-                for (const filePath of walkedFiles) {
-                    const relativePath = normalizeRelativePath(filePath);
-                    if (globRegexes.some((regex) => regex.test(relativePath))) {
-                        discoveredFiles.add(path.resolve(filePath));
-                    }
+            const walkedFiles = [];
+            await walkDirectory(process.cwd(), walkedFiles);
+            for (const filePath of walkedFiles) {
+                const relativePath = normalizeRelativePath(filePath);
+                if (globRegexes.some((regex) => regex.test(relativePath))) {
+                    discoveredFiles.add(path.resolve(filePath));
                 }
             }
         }
     }
 
-    if (globPatterns.length === 0 && directoryTargets.length > 0) {
+    // Positional targets are a union. A directory must still contribute all of
+    // its lintable files when a separate glob is supplied in the same command.
+    if (directoryTargets.length > 0) {
         for (const directoryPath of directoryTargets) {
             const files = [];
             await walkDirectory(directoryPath, files);
@@ -2725,26 +3402,20 @@ async function runWithConcurrency(items, concurrency, worker) {
     return results;
 }
 
-// v3 core change: precompute file sources and gather all arbitrary-value tokens
-// up front, then batch-canonicalize the unique set once. Non-arbitrary tokens
+// Precompute class snippets and gather all arbitrary-value tokens up front,
+// then canonicalize each unique cache miss once. Non-arbitrary tokens
 // are never canonicalized because Tailwind's canonicalizer is a no-op for them
 // (verified empirically: 0/27,060 non-arbitrary tokens changed in this
 // codebase). This removes the majority of Tailwind design-system calls.
 async function collectStaticShorthandFindings(filePaths, { suggestNamedThemeVars = false, themeCssPath = null } = {}) {
-    // Pass 1: read every file, extract class snippets, collect unique arbitrary
-    // tokens across the entire set for a single batched canonicalization.
+    // Pass 1: read every file, extract class snippets, and collect unique
+    // arbitrary tokens across the entire set for cache pre-warming.
     const fileContexts = new Array(filePaths.length);
     const uniqueArbitraryRaws = new Set();
     const uniqueThemeVarRaws = new Set();
-    // Matches:
-    //   - bracket arbitrary form:    `[a-z][a-z0-9-]*-[ ... ]`
-    //   - paren CSS-var form:        `[a-z][a-z0-9-]*-(--name)`
-    //   - bracket-var form:          `[a-z][a-z0-9-]*-[var(--name)]`  (already covered by the bracket arm)
-    // An optional trailing `/<modifier>` (e.g. opacity `/40`) is captured so
-    // tokens like `border-[var(--color-ink-400)]/40` reach the canonicalizer
-    // and named-theme-var resolver intact.
-    const arbitraryTokenRegex = /(?:^|\s)((?:[a-z0-9-]+:)*!?[a-z][a-z0-9-]*-(?:\[[^\]\s]+\]|\(--[a-z0-9-]+\))(?:\/[^\s]+)?!?)(?=\s|$)/gi;
-
+    const scanFailures = [];
+    const scanSkipped = [];
+    let lintedFiles = 0;
     await runWithConcurrency(filePaths, FILE_SCAN_CONCURRENCY, async (filePath, idx) => {
         try {
             const stats = await fs.stat(filePath);
@@ -2752,10 +3423,15 @@ async function collectStaticShorthandFindings(filePaths, { suggestNamedThemeVars
                 console.error(
                     `normwinds: skipping ${filePath} (${stats.size} bytes exceeds the ${MAX_SCANNED_FILE_BYTES}-byte scan limit)`,
                 );
+                scanSkipped.push({
+                    filePath,
+                    reason: `exceeds ${MAX_SCANNED_FILE_BYTES}-byte scan limit (${stats.size} bytes)`,
+                });
                 fileContexts[idx] = null;
                 return;
             }
-        } catch {
+        } catch (error) {
+            scanFailures.push({ filePath, stage: "stat", error });
             fileContexts[idx] = null;
             return;
         }
@@ -2763,26 +3439,36 @@ async function collectStaticShorthandFindings(filePaths, { suggestNamedThemeVars
         let sourceText;
         try {
             sourceText = await fs.readFile(filePath, "utf8");
-        } catch {
+        } catch (error) {
+            scanFailures.push({ filePath, stage: "read", error });
             fileContexts[idx] = null;
             return;
         }
-
         if (!sourceText.includes("-") && !sourceText.includes("!")) {
+            lintedFiles += 1;
             fileContexts[idx] = null;
             return;
         }
 
-        const snippets = extractClassLikeStrings(sourceText, {
-            allowSingleTokenCanonical: filePath.endsWith(".vue"),
-        });
+        let snippets;
+        try {
+            snippets = extractClassLikeStrings(sourceText, {
+                allowSingleTokenCanonical: filePath.endsWith(".vue"),
+                filePath,
+            });
+        } catch (error) {
+            scanFailures.push({ filePath, stage: "parse", error });
+            fileContexts[idx] = null;
+            return;
+        }
+        lintedFiles += 1;
         if (snippets.length === 0) {
             fileContexts[idx] = null;
             return;
         }
 
         // Collect arbitrary raw tokens (containing `[` or `(--`) for global
-        // batch canonicalization. Also note which snippets need the
+        // cache pre-warming. Also note which snippets need the
         // canonicalizer / theme-var resolver.
         const perSnippetArbitraryRaws = new Array(snippets.length);
         let hasAnyArbitrary = false;
@@ -2798,19 +3484,27 @@ async function collectStaticShorthandFindings(filePaths, { suggestNamedThemeVars
             if (hasBracket) {
                 hasAnyArbitrary = true;
             }
-            arbitraryTokenRegex.lastIndex = 0;
+            const tokenRegex = /\S+/g;
             let match;
             const raws = [];
-            while ((match = arbitraryTokenRegex.exec(snippet.value)) !== null) {
-                const raw = match[1];
+            while ((match = tokenRegex.exec(snippet.value)) !== null) {
+                const raw = match[0];
+                if (!isLikelyFixUtility(raw)) {
+                    continue;
+                }
+                const isArbitrary = raw.includes("[");
+                const isThemeVar = suggestNamedThemeVars && tokenLooksLikeNamedThemeVarCandidate(raw);
+                if (!isArbitrary && !isThemeVar) {
+                    continue;
+                }
                 raws.push({
                     raw,
-                    snippetOffset: match.index + match[0].lastIndexOf(raw),
+                    snippetOffset: match.index,
                 });
-                if (raw.includes("[")) {
+                if (isArbitrary) {
                     uniqueArbitraryRaws.add(raw);
                 }
-                if (suggestNamedThemeVars && tokenLooksLikeNamedThemeVarCandidate(raw)) {
+                if (isThemeVar) {
                     uniqueThemeVarRaws.add(raw);
                 }
             }
@@ -2819,8 +3513,8 @@ async function collectStaticShorthandFindings(filePaths, { suggestNamedThemeVars
 
         fileContexts[idx] = {
             filePath,
-            sourceText,
             snippets,
+            lineStarts: buildLineStarts(sourceText),
             perSnippetArbitraryRaws,
             hasAnyArbitrary,
             hasAnyThemeVarCandidate: suggestNamedThemeVars && sourceText.includes("(--"),
@@ -2838,11 +3532,14 @@ async function collectStaticShorthandFindings(filePaths, { suggestNamedThemeVars
     }
 
     if (cacheMisses.length > 0) {
-        const canonicalizeCandidate = await getCanonicalizeCandidate().catch(() => null);
-        if (canonicalizeCandidate) {
-            for (const raw of cacheMisses) {
-                canonicalizeCandidate(raw);
-            }
+        if (cacheMisses.length > MAX_LIVE_CANONICALIZATION_CANDIDATES) {
+            throw new Error(
+                `normwinds: refusing to live-canonicalize ${cacheMisses.length} unique cache misses in one run (limit: ${MAX_LIVE_CANONICALIZATION_CANDIDATES}). Split the scan, regenerate the canonical snapshot, or warm the cache in smaller batches.`,
+            );
+        }
+        const canonicalizeCandidate = await getCanonicalizeCandidate();
+        for (const raw of cacheMisses) {
+            canonicalizeCandidate(raw);
         }
     }
 
@@ -2872,18 +3569,18 @@ async function collectStaticShorthandFindings(filePaths, { suggestNamedThemeVars
             return [];
         }
 
-        const { filePath, sourceText, snippets, perSnippetArbitraryRaws, hasAnyArbitrary, hasAnyThemeVarCandidate } = ctx;
+        const {
+            filePath,
+            snippets,
+            lineStarts,
+            perSnippetArbitraryRaws,
+            hasAnyArbitrary,
+            hasAnyThemeVarCandidate,
+        } = ctx;
         const relativePath = toRelative(filePath);
         const localFound = new Map();
 
-        // Only build line-start index if we actually need per-token line/col.
-        let lineStarts = null;
-        const ensureLineStarts = () => {
-            if (!lineStarts) {
-                lineStarts = buildLineStarts(sourceText);
-            }
-            return lineStarts;
-        };
+        const ensureLineStarts = () => lineStarts;
 
         // If every arbitrary token is cached, we never loaded Tailwind.
         // Use the cache-only lookup; otherwise fall through to the full
@@ -2891,7 +3588,7 @@ async function collectStaticShorthandFindings(filePaths, { suggestNamedThemeVars
         let canonicalizeCandidate = null;
         if (hasAnyArbitrary) {
             if (canonicalizerFnPromise) {
-                canonicalizeCandidate = await canonicalizerFnPromise.catch(() => null);
+                canonicalizeCandidate = await canonicalizerFnPromise;
             } else {
                 canonicalizeCandidate = lookupCanonicalFromMemo;
             }
@@ -2997,13 +3694,34 @@ async function collectStaticShorthandFindings(filePaths, { suggestNamedThemeVars
         return [...localFound.values()];
     });
 
-    return perFileFindings.flat().sort(
+    const findings = perFileFindings.flat().sort(
         (a, b) =>
             a.filePath.localeCompare(b.filePath) ||
             a.line - b.line ||
             a.column - b.column ||
             a.message.localeCompare(b.message),
     );
+    return {
+        findings,
+        lintedFiles,
+        skipped: scanSkipped,
+        failures: scanFailures,
+    };
+}
+
+function printScanIssueSummary(skipped, failures) {
+    if (skipped.length === 0 && failures.length === 0) {
+        return;
+    }
+    console.error(
+        `\nnormwinds: audit summary — ${skipped.length} skipped, ${failures.length} failed`,
+    );
+    for (const { filePath, reason } of skipped) {
+        console.error(`  - ${filePath} [skipped]: ${reason}`);
+    }
+    for (const { filePath, stage, error } of failures) {
+        console.error(`  - ${filePath} [failed:${stage}]: ${error?.message || String(error)}`);
+    }
 }
 
 function printTextReport(findings, lintedFiles) {
@@ -3130,13 +3848,21 @@ async function main() {
         );
     }
 
-    let fixFailures = 0;
+    let fixIssues = 0;
     if (fix) {
         const fixResult = await applyFixes(filePaths, { fixAll, suggestNamedThemeVars, themeCssPath, dryRun });
-        fixFailures = fixResult.failed;
+        fixIssues = fixResult.failed + fixResult.skipped;
     }
 
-    const findings = await collectStaticShorthandFindings(filePaths, { suggestNamedThemeVars, themeCssPath });
+    const scanResult = await collectStaticShorthandFindings(filePaths, { suggestNamedThemeVars, themeCssPath });
+    const {
+        findings,
+        lintedFiles,
+        skipped: scanSkipped,
+        failures: scanFailures,
+    } = scanResult;
+    printScanIssueSummary(scanSkipped, scanFailures);
+    const scanIssues = scanSkipped.length + scanFailures.length;
 
     await saveDiskCache();
 
@@ -3146,7 +3872,7 @@ async function main() {
                 {
                     version: NORMWINDS_VERSION,
                     ruleId: RULE_ID,
-                    lintedFiles: filePaths.length,
+                    lintedFiles,
                     findingCount: findings.length,
                     findings,
                 },
@@ -3155,13 +3881,13 @@ async function main() {
             ),
         );
     } else {
-        printTextReport(findings, filePaths.length);
+        printTextReport(findings, lintedFiles);
     }
 
     // Exit 2 distinguishes a partial-failure run (some files couldn't be written)
     // from a clean audit (0) or one that merely found lint issues (1), so CI can
     // tell the difference.
-    process.exitCode = fixFailures > 0 ? 2 : findings.length > 0 ? 1 : 0;
+    process.exitCode = fixIssues > 0 || scanIssues > 0 ? 2 : findings.length > 0 ? 1 : 0;
 }
 
 main().catch((error) => {

@@ -17,8 +17,8 @@ What it does:
        runs `npm publish --dry-run` at the new version to catch npm
        packaging/version-collision problems before anything is pushed (the
        bump is restored if the dry-run fails).
-    2. Commits, tags, and pushes to GitHub (using github_pat from .env,
-       falling back to the gh CLI token)
+    2. Commits, tags, and pushes to GitHub (preferring GITHUB_TOKEN from the
+       process environment, then the gh CLI keyring, then github_pat from .env)
     3. Creates a GitHub release via the API
     4. Waits for the "Release" GitHub Actions workflow (triggered by the tag
        push) to publish to npm with --provenance, then verifies the new
@@ -31,6 +31,7 @@ Single source of truth:
 """
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -134,7 +135,7 @@ def github_api(method: str, path: str, body: dict | None, token: str) -> dict:
         },
     )
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         body_text = exc.read().decode(errors="replace")
@@ -157,7 +158,7 @@ def gh_cli_token_fallback() -> str:
             return ""
         token = result.stdout.strip()
         if result.returncode == 0 and token:
-            print(f"github_pat missing in .env — using the `gh` CLI token for {owner}.")
+            print(f"  Using the `gh` CLI credential for {owner}.")
             return token
     return ""
 
@@ -284,24 +285,31 @@ def bump_version(new_version: str) -> str:
 def git_commit_tag_push(new_version: str, message: str, github_pat: str) -> None:
     step("2/4  Git commit, tag, and push")
 
-    run(["git", "add", "-A"])
+    # The tree was clean at preflight and the release only owns these files.
+    # Staging everything could accidentally commit an unrelated file created
+    # by an editor or background process after that check.
+    run(["git", "add", "--", "package.json", "package-lock.json"])
     run(["git", "commit", "-m", message])
 
     tag = f"v{new_version}"
     run(["git", "tag", tag])
 
-    remote_url = f"https://x-access-token:{github_pat}@github.com/{GITHUB_REPO}.git"
-    clean_url = f"https://github.com/{GITHUB_REPO}.git"
+    # Pass the PAT to this one git process through an ephemeral config
+    # environment. It never appears in argv or .git/config, so an interruption
+    # cannot leave a credential embedded in the repository's remote URL.
+    basic_auth = base64.b64encode(
+        f"x-access-token:{github_pat}".encode("utf-8")
+    ).decode("ascii")
+    git_auth_env = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+        "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic_auth}",
+    }
     run(
-        ["git", "remote", "set-url", "origin", remote_url],
-        display=f"git remote set-url origin https://x-access-token:***@github.com/{GITHUB_REPO}.git",
+        ["git", "push", "--atomic", "origin", "main", tag],
+        env_extra=git_auth_env,
+        display=f"git push --atomic origin main {tag}",
     )
-    try:
-        run(["git", "push", "origin", "main", "--tags"])
-    finally:
-        # Always restore the clean URL — even when the push fails — so the
-        # PAT never lingers in .git/config.
-        run(["git", "remote", "set-url", "origin", clean_url])
 
     print(f"  Pushed main + tag {tag}")
 
@@ -412,7 +420,7 @@ def await_actions_publish(new_version: str, github_pat: str) -> None:
             headers={"Accept": "application/vnd.npm.install-v1+json"},
         )
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=30) as resp:
                 packument = json.loads(resp.read())
             if new_version in (packument.get("versions") or {}):
                 print(f"  Verified: @lunawerx/normwind@{new_version} is live on npm.")
@@ -487,31 +495,42 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    new_version = args.version.lstrip("v")
+    new_version = args.version.removeprefix("v")
 
-    # Validate semver-ish.
-    if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-.].+)?", new_version):
+    # Validate SemVer 2.0.0, including optional prerelease/build identifiers.
+    semver_pattern = (
+        r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
+        r"(?:-(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+        r"(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?"
+        r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    )
+    if not re.fullmatch(semver_pattern, new_version):
         sys.exit(f"Invalid version: {new_version!r}  (expected e.g. 3.0.4)")
 
     # Load credentials.
     env = load_env(ENV_FILE)
-    github_pat = env.get("github_pat", "")
-    npm_token = env.get("NODE_AUTH_TOKEN", "")
+    github_pat = (
+        os.environ.get("GITHUB_TOKEN", "")
+        or gh_cli_token_fallback()
+        or env.get("github_pat", "")
+    )
+    npm_token = os.environ.get("NODE_AUTH_TOKEN", "") or env.get("NODE_AUTH_TOKEN", "")
 
     if not github_pat:
-        github_pat = gh_cli_token_fallback()
-    if not github_pat:
         sys.exit(
-            f"github_pat not found in {ENV_FILE} and no usable `gh` CLI "
-            "login found. Add a fine-grained PAT (Contents: read/write on "
-            f"{GITHUB_REPO}) to {ENV_FILE}, or `gh auth login`."
+            "No GitHub credential was available. Run `gh auth login`, set "
+            "GITHUB_TOKEN in the process environment, or add a fine-grained "
+            f"PAT (Contents: read/write on {GITHUB_REPO}) to {ENV_FILE}."
         )
     # npm credentials are only needed on this machine for --publish-locally;
     # the normal path publishes from GitHub Actions using the NPM_TOKEN
     # repository secret. The pre-flight `npm publish --dry-run` never
     # contacts the registry with the token, so a placeholder is fine there.
     if args.publish_locally and not npm_token:
-        sys.exit(f"NODE_AUTH_TOKEN not found in {ENV_FILE} (required for --publish-locally)")
+        sys.exit(
+            "NODE_AUTH_TOKEN was not found in the process environment or "
+            f"{ENV_FILE} (required for --publish-locally)"
+        )
 
     commit_message = args.message or (f"release: publish {new_version}")
 
@@ -537,13 +556,13 @@ def main() -> None:
     assert_git_state()
     assert_github_credentials(github_pat)
 
-    bump_version(new_version)
     try:
+        bump_version(new_version)
         npm_dry_run(npm_token)
     except SystemExit:
-        run(["git", "checkout", "--", "package.json", "package-lock.json"])
+        run(["git", "restore", "--", "package.json", "package-lock.json"])
         print(
-            "npm publish dry-run failed. Restored package.json / "
+            "Version preparation or npm publish dry-run failed. Restored package.json / "
             "package-lock.json; nothing was pushed or published.",
             file=sys.stderr,
         )
